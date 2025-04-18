@@ -1,0 +1,72 @@
+input/*
+output/*
+samples/*
+logs/*
+
+# Python bytecode files
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Distribution / Packaging
+.Python
+build/
+dist/
+*.egg-info/
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# macOS system files
+.DS_Store
+
+# Windows system files
+Thumbs.db
+ehthumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Pytest cache
+.cache
+
+# Environment variable files
+.env
+.env.*
+
+# Python linting
+*.pylintrc
+
+# mypy
+.mypy_cache/
+.dmypy.json
+.pyre/
+
+# VS Code settings
+.vscode/
+
+# PyCharm settings
+.idea/
+
+# Coverage report files
+.coverage
+.coverage.*
+nosetests.xml
+test_*.xml
+*.cover
+
+# Log files
+*.log
+
+# Docker
+docker-compose.override.yml
+*.env
+
+# Django
+*.sqlite3
