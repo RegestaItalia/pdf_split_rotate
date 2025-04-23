@@ -3,6 +3,8 @@ output/*
 samples/*
 logs/*
 
+processed_files.txt
+
 # Python bytecode files
 __pycache__/
 *.py[cod]
@@ -39,6 +41,7 @@ ehthumbs.db
 # Environment variable files
 .env
 .env.*
+!.env.template
 
 # Python linting
 *.pylintrc
