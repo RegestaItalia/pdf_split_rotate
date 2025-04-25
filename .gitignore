@@ -5,6 +5,8 @@ logs/*
 
 processed_files.txt
 
+!.gitkeep
+
 # Python bytecode files
 __pycache__/
 *.py[cod]
