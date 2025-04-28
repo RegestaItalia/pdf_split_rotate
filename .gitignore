@@ -1,7 +1,9 @@
 input/*
 output/*
-samples/*
 logs/*
+samples/*
+!questa_pag_la_sbaglia.pdf
+!test_pdf.pdf
 
 processed_files.txt
 

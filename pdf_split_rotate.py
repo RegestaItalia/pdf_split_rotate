@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv()
+load_dotenv(override=True)
 WATCH_FOLDER        = os.path.abspath(os.getenv('WATCH_FOLDER', './input'))
 OUTPUT_FOLDER       = os.path.abspath(os.getenv('OUTPUT_FOLDER', './output'))
 PROCESSED_FILE_PATH = os.path.abspath(os.getenv('PROCESSED_FILE_PATH', './processed_files.txt'))
@@ -57,20 +57,37 @@ def wait_until_file_is_ready(path: str):
                 f.read(1)
             return
         except (PermissionError, IOError):
-            logging.info(f"{path} not ready, retry {i+1}/{RETRIES}")
+            logging.info(f"{path} not ready, retry {i + 1}/{RETRIES}")
             time.sleep(RETRY_DELAY)
     raise TimeoutError(f"{path} not ready after {RETRIES * RETRY_DELAY}s")
 
-# Raster-based rotation
-def detect_orientation(pdf_document):
-    try:
-        pix = pdf_document[0].get_pixmap(dpi=200)
-        img = Image.open(io.BytesIO(pix.tobytes()))
-        osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
-        return osd.get('rotate', 0)
-    except Exception as e:
-        logging.error(f"Orientation detection failed: {e}")
-        return 0
+def detect_orientation(pdf_document, initial_dpi=200, max_trials=3):
+    dpi = initial_dpi
+    last_rotate = 0
+    last_conf = 0
+    for trial in range(1, max_trials + 1):
+        try:
+            pix = pdf_document[0].get_pixmap(dpi=dpi)
+            img = Image.open(io.BytesIO(pix.tobytes()))
+            osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
+            rotate = osd.get('rotate', 0)
+            conf = osd.get('orientation_conf', 0)
+            logging.debug(f"Trial {trial}: DPI={dpi}, orientation={rotate}, confidence={conf}")
+            if conf >= 2:
+                if trial > 1:
+                    logging.info(f"Orientation stabilized at trial {trial} (DPI={dpi}) with confidence {conf}")
+                return rotate
+            logging.warning(f"Low orientation confidence ({conf}) at DPI={dpi}; retrying with higher DPI.")
+            last_rotate, last_conf = rotate, conf
+            dpi += 100
+        except Exception as e:
+            logging.error(f"Orientation detection failed on trial {trial} (DPI={dpi}): {e}")
+            dpi += 100
+    logging.warning(
+        f"Max trials ({max_trials}) reached. "
+        f"Returning last detected orientation {last_rotate} with confidence {last_conf}"
+    )
+    return last_rotate
 
 def rotate_pdf(page_doc, rotation_angle):
     if rotation_angle == 0:
@@ -87,6 +104,24 @@ def rotate_pdf(page_doc, rotation_angle):
         logging.error(f"Error rotating PDF: {e}")
         return page_doc
 
+# === Progress counters ===
+total_count = 0
+done_count = 0
+total_lock = threading.Lock()
+done_lock = threading.Lock()
+
+def increment_total():
+    global total_count
+    with total_lock:
+        total_count += 1
+
+def update_progress(_future):
+    global done_count, total_count
+    with done_lock:
+        done_count += 1
+        pct = (done_count / total_count * 100) if total_count else 0
+        logging.info(f"Progress: {done_count}/{total_count} PDFs processed ({pct:.1f}%)")
+
 # The processing function
 def process_pdf(pdf_path: str):
     with processed_lock:
@@ -100,17 +135,16 @@ def process_pdf(pdf_path: str):
         doc = fitz.open(pdf_path)
         base = os.path.splitext(os.path.basename(pdf_path))[0]
         rel_dir = os.path.relpath(os.path.dirname(pdf_path), WATCH_FOLDER)
-        target_dir = os.path.join(OUTPUT_FOLDER, rel_dir, base)
+        first_under_root = os.path.normpath(rel_dir).lstrip(os.sep).split(os.sep)[0]
+        target_dir = os.path.join(OUTPUT_FOLDER, first_under_root)#rel_dir, base)
         os.makedirs(target_dir, exist_ok=True)
 
         for pno in range(doc.page_count):
             single = fitz.open()
             single.insert_pdf(doc, from_page=pno, to_page=pno)
-
             angle = detect_orientation(single)
             logging.info(f"Page {pno + 1}: detected rotation {angle}°")
-
-            out_path = os.path.join(target_dir, f"{base}_page_{pno + 1}.pdf")
+            out_path = os.path.join(target_dir, f"{'_'.join(os.path.normpath(rel_dir).strip(os.sep).split(os.sep)[1:])} - {base} - page_{pno + 1}.pdf")
             if angle:
                 rotated = rotate_pdf(single, angle)
                 rotated.save(out_path)
@@ -138,10 +172,13 @@ def queue_worker():
         job_queue.task_done()
         if pdf_path is None:
             break
-        executor.submit(process_pdf, pdf_path)
+        # increment total before submitting
+        increment_total()
+        future = executor.submit(process_pdf, pdf_path)
+        future.add_done_callback(update_progress)
 
 # Start single queue thread
-t_queue = threading.Thread(target=queue_worker)
+t_queue = threading.Thread(target=queue_worker, daemon=True)
 t_queue.start()
 
 # Watchdog handler
@@ -167,12 +204,9 @@ def scan_existing_pdfs(root: str):
                 with processed_lock:
                     if full in processed_files:
                         continue
-                try:
-                    wait_until_file_is_ready(full)
-                    job_queue.put(full)
-                    logging.info(f"Enqueued existing {full}")
-                except Exception as e:
-                    log_error(full, str(e))
+                wait_until_file_is_ready(full)
+                job_queue.put(full)
+                logging.info(f"Enqueued existing {full}")
 
 if __name__ == "__main__":
     # Optional reset

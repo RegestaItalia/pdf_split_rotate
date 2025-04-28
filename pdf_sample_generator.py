@@ -40,9 +40,9 @@ def merge_and_rotate_pdfs(pdf_paths, rotate_probability=0.8, page_cap=None):
 
 if __name__ == "__main__":
     folder = "samples/libra"  # change this to your folder path
-    output_pdf = "samples/sample.pdf"
+    output_pdf = "samples/test_pdf.pdf"
     n = 10  # number of PDFs to merge
-    page_cap = 15  # limit the number of pages to 10 (set to None for no limit)
+    page_cap = 30  # limit the number of pages to 10 (set to None for no limit)
 
     all_pdfs = get_all_pdf_paths(folder)
     selected_pdfs = random.sample(all_pdfs, min(n, len(all_pdfs)))
