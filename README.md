@@ -120,7 +120,3 @@ python pdf_split_rotate.py
 ## Contributing
 
 Contributions, bug reports, and feature requests are welcome. Please open an issue or submit a pull request.
-
-## License
-
-This project is licensed under the MIT License. Feel free to use and modify.
