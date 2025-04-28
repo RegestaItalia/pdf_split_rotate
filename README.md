@@ -73,29 +73,22 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Create a `.env` file in the project root to override default settings:
+Below is the example `.env` file located in the project root:
 
 ```ini
-# Folder to watch for incoming PDF files
-WATCH_FOLDER=./input
+# Directory paths
+WATCH_FOLDER = ./input
+OUTPUT_FOLDER = ./output
+PROCESSED_FILE_PATH = ./logs/processed_files.txt
+ERROR_LOG_PATH = ./logs/error_log.txt
 
-# Folder to save processed PDF pages
-OUTPUT_FOLDER=./output
+# Conf params
+MAX_WORKERS = 12
+RETRIES = 5
+RETRY_DELAY = 1
 
-# Path to store list of processed files
-PROCESSED_FILE_PATH=./processed_files.txt
-
-# Path for error log file
-ERROR_LOG_PATH=./error_log.txt
-
-# Maximum number of parallel workers
-MAX_WORKERS=4
-
-# Number of retries to check file readiness
-FILE_READY_RETRIES=10
-
-# Delay (in seconds) between file readiness retries
-FILE_READY_DELAY=1
+# Flag to reset processed files tracking (optional)
+RESET_PROGRESS = false
 ```
 
 If not provided, default values (shown above) will be used.
@@ -104,7 +97,7 @@ If not provided, default values (shown above) will be used.
 
 Run the script directly:
 ```bash
-python pdf_watcher.py
+python pdf_split_rotate.py
 ```
 
 - The script will start watching the `WATCH_FOLDER`.
@@ -116,13 +109,13 @@ python pdf_watcher.py
 To reset the processed files list and reprocess all PDFs, set the environment variable:
 ```bash
 export RESET_PROGRESS=true
-python pdf_watcher.py
+python pdf_split_rotate.py
 ```
 
 ## Logging
 
 - **Console logs**: Informational messages about file processing.
-- **Error log**: Detailed errors in `error_log.txt`.
+- **Error log**: Detailed errors in `logs/error_log.txt`.
 
 ## Contributing
 
