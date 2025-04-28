@@ -1,102 +1,133 @@
+# PDF Watcher and Processor
 
-# **PDF Splitter and Orientation Corrector**
+## Overview
+This Python script monitors a specified directory (and its subdirectories) for PDF files and automatically processes them by splitting each PDF into individual pages, detecting page orientation using Tesseract OCR, rotating pages if necessary, and saving each page as a separate one-page PDF.
 
-This Python project listens to a folder for newly added scanned PDF files. Upon detecting a new file, it splits the PDF into individual pages, performs OCR (Optical Character Recognition) to detect text orientation, and rotates each page to ensure that the text is aligned properly, similar to how it would appear in a regular book. The final output is saved as one PDF per page, with each page rotated for correct orientation.
+Key features:
+- **Real-time directory watching**: Automatically detects newly added PDF files.
+- **Existing file scan**: Processes existing PDFs in the watch folder on startup.
+- **Orientation detection**: Uses Tesseract OCR to determine rotation angles.
+- **Automatic rotation**: Rotates pages to upright orientation.
+- **Concurrent processing**: Employs a process pool executor for parallel processing.
+- **Tracking**: Maintains a list of processed files to avoid reprocessing.
+- **Error logging**: Logs any processing errors to a dedicated file.
 
-## **Features**
+## Requirements
 
-- **Monitors a Folder**: Automatically detects new PDF files added to a specified directory.
-- **Splits PDFs**: Each PDF is split into individual pages.
-- **OCR-Based Orientation Detection**: Uses Tesseract OCR to detect the orientation of text.
-- **Page Rotation**: Rotates pages as needed to ensure the text is properly oriented.
-- **Efficient and Easy Setup**: With minimal dependencies, the solution is quick to deploy and configure.
+### Software
+- Python **3.7+**
+- **Poppler** utilities (for `pdf2image`):
+  - Linux: `poppler-utils`
+  - Windows: Download binaries from [Poppler for Windows](http://blog.alivate.com.au/poppler-windows/)
+- **Tesseract OCR** engine:
+  - Linux: `tesseract-ocr`
+  - Windows: Installer from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
+- Ghostscript (optional, can improve PDF handling performance)
 
----
+### Python Packages
+All Python dependencies are listed in `requirements.txt`:
+```text
+watchdog
+PyMuPDF
+pdf2image
+pytesseract
+Pillow
+python-dotenv
+```
 
-## **Prerequisites**
-
-Before running the project, make sure to install the required dependencies:
-
-### 1. **Python Dependencies**:
-You’ll need to install the following Python packages using `pip`:
+Install them via:
 ```bash
-pip install watchdog pymupdf pytesseract pdf2image
+pip install -r requirements.txt
 ```
 
-### 2. **External Dependencies**:
+## Installation Guide
 
-- **Tesseract OCR**: Tesseract is required for OCR-based text orientation detection. Download and install it based on your OS:
-  - **Windows**: Download from [Tesseract for Windows](https://github.com/tesseract-ocr/tesseract) and follow the installation instructions. Ensure that `tesseract.exe` is in your system’s `PATH`.
-  - **macOS**: Install via Homebrew: `brew install tesseract`
-  - **Linux**: Install using `apt`: `sudo apt install tesseract-ocr`
+### Linux (Ubuntu / Debian)
+1. Update package list:
+    ```bash
+    sudo apt update
+    ```
+2. Install system dependencies:
+    ```bash
+    sudo apt install -y poppler-utils tesseract-ocr libtesseract-dev ghostscript
+    ```
+3. Clone the repository and install Python dependencies:
+    ```bash
+    git clone <your-repo-url>
+    cd <your-repo-name>
+    pip install -r requirements.txt
+    ```
 
-- **Poppler** (for PDF to Image conversion):
-  - **Windows**: Download from [Poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases) and add it to your `PATH`.
-  - **macOS**: Install via Homebrew: `brew install poppler`
-  - **Linux**: Install via `apt`: `sudo apt install poppler-utils`
+### Windows
+1. Install Python 3.7+ from the [official website](https://www.python.org/downloads/).
+2. Download and install **Poppler for Windows**:
+   - Unzip and add the `bin/` directory to your PATH.
+3. Download and install **Tesseract OCR** from the [UB Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki).
+4. (Optional) Install Ghostscript and add to PATH.
+5. Clone the repository and install Python dependencies:
+    ```powershell
+    git clone <your-repo-url>
+    cd <your-repo-name>
+    pip install -r requirements.txt
+    ```
 
----
+## Configuration
 
-## **Usage**
+Create a `.env` file in the project root to override default settings:
 
-### 1. **Set Up the Folder to Monitor**:
-Create a folder where PDFs will be placed. The script will automatically detect new PDFs added to this folder.
+```ini
+# Folder to watch for incoming PDF files
+WATCH_FOLDER=./input
 
-### 2. **Start the Script**:
-Run the Python script to start monitoring the folder:
+# Folder to save processed PDF pages
+OUTPUT_FOLDER=./output
+
+# Path to store list of processed files
+PROCESSED_FILE_PATH=./processed_files.txt
+
+# Path for error log file
+ERROR_LOG_PATH=./error_log.txt
+
+# Maximum number of parallel workers
+MAX_WORKERS=4
+
+# Number of retries to check file readiness
+FILE_READY_RETRIES=10
+
+# Delay (in seconds) between file readiness retries
+FILE_READY_DELAY=1
+```
+
+If not provided, default values (shown above) will be used.
+
+## Usage
+
+Run the script directly:
 ```bash
-python pdf_orientation_corrector.py
+python pdf_watcher.py
 ```
 
-Once started, the script will listen for new PDFs in the specified folder. When a new PDF is detected, it will:
-- Split the PDF into individual pages.
-- Perform OCR to detect text orientation.
-- Rotate pages if needed.
-- Save the rotated pages as separate PDF files.
+- The script will start watching the `WATCH_FOLDER`.
+- New and existing PDF files will be enqueued and processed.
+- Processed pages will be saved under `OUTPUT_FOLDER` in subdirectories mirroring the input structure.
+- Processing logs will appear in the console.
+- Errors are logged to `ERROR_LOG_PATH`.
 
-### 3. **Example Folder Setup**:
-1. **Input Folder**: Place the PDFs you want to process into `./pdf_folder/` (or any folder you choose).
-2. **Output Folder**: The processed PDFs (with individual pages and correct orientations) will be saved to `./processed/`.
-
----
-
-## **File Structure**
-
-```
-.
-├── pdf_orientation_corrector.py       # Main Python script
-├── requirements.txt                  # List of required Python dependencies
-├── README.md                         # Project documentation
-└── pdf_folder/                       # Folder for input PDFs
-└── processed/                         # Folder for output PDFs
+To reset the processed files list and reprocess all PDFs, set the environment variable:
+```bash
+export RESET_PROGRESS=true
+python pdf_watcher.py
 ```
 
----
+## Logging
 
-## **How It Works**
+- **Console logs**: Informational messages about file processing.
+- **Error log**: Detailed errors in `error_log.txt`.
 
-1. **Folder Monitoring**: The `watchdog` library monitors the specified folder (`./pdf_folder/`) for new PDF files.
-2. **PDF Splitting**: When a new PDF is added, the script splits it into individual pages using `PyMuPDF`.
-3. **OCR & Rotation**: The script then uses `pdf2image` to convert the first page into an image, which is processed by `pytesseract` to detect the text's orientation. Based on this, it determines if rotation is required.
-4. **Output**: After rotation, the pages are saved into the `./processed/` folder as individual PDFs, each with the correct orientation.
+## Contributing
 
----
+Contributions, bug reports, and feature requests are welcome. Please open an issue or submit a pull request.
 
-## **Additional Configuration**
+## License
 
-- **Tesseract Configuration**: You can customize Tesseract settings by modifying the `pytesseract` configuration, for example, adjusting the language or OCR parameters.
-  
-- **DPI for OCR**: You can adjust the DPI value for `pdf2image` in case you need better OCR accuracy (higher DPI means better quality images but may be slower).
-
----
-
-## **Troubleshooting**
-
-- **OCR Errors**: If Tesseract fails to detect text properly, consider increasing the DPI for image conversion or fine-tuning Tesseract's configuration.
-- **Rotation Issues**: In some cases, Tesseract might not perfectly detect the correct rotation angle due to image quality. You can adjust the script to handle more specific cases based on your needs.
-
----
-
-## **License**
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. Feel free to use and modify.
