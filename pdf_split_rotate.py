@@ -84,9 +84,9 @@ def detect_orientation(pdf_document, source_path: str, page_no: int, initial_dpi
             logging.debug(f"Trial {trial}: DPI={dpi}, orientation={rotate}, confidence={conf} (File={source_path}, Page={page_no + 1})")
             if conf >= 2:
                 if trial > 1:
-                    logging.info(f"Orientation stabilized at trial {trial} (DPI={dpi}) with confidence {conf} for {source_path}, page {page_no + 1}")
+                    logging.info(f"Orientation ({rotate}) stabilized at trial {trial} (DPI={dpi}) with confidence {conf} for {source_path}, page {page_no + 1}")
                 return rotate
-            logging.warning(f"Low orientation confidence ({conf}) at DPI={dpi} for {source_path}, page {page_no + 1}; retrying with higher DPI.")
+            logging.warning(f"Low orientation ({rotate}) confidence ({conf}) at DPI={dpi} for {source_path}, page {page_no + 1}; retrying with higher DPI.")
             last_rotate, last_conf = rotate, conf
             dpi += 100
         except Exception as e:
@@ -95,9 +95,7 @@ def detect_orientation(pdf_document, source_path: str, page_no: int, initial_dpi
             logging.error(err_msg)
             log_error(source_path, err_msg)
             dpi += 100
-    final_warning = (f"Max trials ({max_trials}) reached for {source_path}, page {page_no + 1}. "
-                     f"Returning last detected orientation {last_rotate} with confidence {last_conf}")
-    logging.warning(final_warning)
+    logging.warning(f"Max trials ({max_trials}) reached for {source_path}, page {page_no + 1}. Returning last detected orientation {last_rotate} with confidence {last_conf}")
     return last_rotate
 
 def rotate_pdf(page_doc, rotation_angle):
