@@ -3,6 +3,7 @@ import time
 import logging
 import threading
 import queue
+import traceback
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import fitz  # PyMuPDF
@@ -19,15 +20,23 @@ WATCH_FOLDER        = os.path.abspath(os.getenv('WATCH_FOLDER', './input'))
 OUTPUT_FOLDER       = os.path.abspath(os.getenv('OUTPUT_FOLDER', './output'))
 PROCESSED_FILE_PATH = os.path.abspath(os.getenv('PROCESSED_FILE_PATH', './processed_files.txt'))
 ERROR_LOG_PATH      = os.path.abspath(os.getenv('ERROR_LOG_PATH', './error_log.txt'))
+WARNINGS_LOG_PATH   = os.path.abspath(os.getenv('WARNINGS_LOG_PATH', './warnings_log.txt'))
 MAX_WORKERS         = int(os.getenv('MAX_WORKERS', '4'))
 RETRIES             = int(os.getenv('FILE_READY_RETRIES', '10'))
 RETRY_DELAY         = float(os.getenv('FILE_READY_DELAY', '1'))
 
-# Prepare output folder
+# Prepare output folder and logs
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+# Ensure warnings log exists
+open(WARNINGS_LOG_PATH, 'a').close()
 
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Handler for warnings
+warnings_handler = logging.FileHandler(WARNINGS_LOG_PATH)
+warnings_handler.setLevel(logging.WARNING)
+warnings_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(warnings_handler)
 
 # Load processed-files set
 def load_processed_files():
@@ -61,7 +70,7 @@ def wait_until_file_is_ready(path: str):
             time.sleep(RETRY_DELAY)
     raise TimeoutError(f"{path} not ready after {RETRIES * RETRY_DELAY}s")
 
-def detect_orientation(pdf_document, initial_dpi=200, max_trials=3):
+def detect_orientation(pdf_document, source_path: str, page_no: int, initial_dpi=200, max_trials=3):
     dpi = initial_dpi
     last_rotate = 0
     last_conf = 0
@@ -72,21 +81,23 @@ def detect_orientation(pdf_document, initial_dpi=200, max_trials=3):
             osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
             rotate = osd.get('rotate', 0)
             conf = osd.get('orientation_conf', 0)
-            logging.debug(f"Trial {trial}: DPI={dpi}, orientation={rotate}, confidence={conf}")
+            logging.debug(f"Trial {trial}: DPI={dpi}, orientation={rotate}, confidence={conf} (File={source_path}, Page={page_no + 1})")
             if conf >= 2:
                 if trial > 1:
-                    logging.info(f"Orientation stabilized at trial {trial} (DPI={dpi}) with confidence {conf}")
+                    logging.info(f"Orientation stabilized at trial {trial} (DPI={dpi}) with confidence {conf} for {source_path}, page {page_no + 1}")
                 return rotate
-            logging.warning(f"Low orientation confidence ({conf}) at DPI={dpi}; retrying with higher DPI.")
+            logging.warning(f"Low orientation confidence ({conf}) at DPI={dpi} for {source_path}, page {page_no + 1}; retrying with higher DPI.")
             last_rotate, last_conf = rotate, conf
             dpi += 100
         except Exception as e:
-            logging.error(f"Orientation detection failed on trial {trial} (DPI={dpi}): {e}")
+            err_msg = f"Orientation detection failed on trial {trial} (DPI={dpi}) for {source_path}, page {page_no + 1}: {e}"
+            traceback.print_exc(e)
+            logging.error(err_msg)
+            log_error(source_path, err_msg)
             dpi += 100
-    logging.warning(
-        f"Max trials ({max_trials}) reached. "
-        f"Returning last detected orientation {last_rotate} with confidence {last_conf}"
-    )
+    final_warning = (f"Max trials ({max_trials}) reached for {source_path}, page {page_no + 1}. "
+                     f"Returning last detected orientation {last_rotate} with confidence {last_conf}")
+    logging.warning(final_warning)
     return last_rotate
 
 def rotate_pdf(page_doc, rotation_angle):
@@ -101,12 +112,13 @@ def rotate_pdf(page_doc, rotation_angle):
             new_page.insert_image(new_page.rect, pixmap=pix)
         return rotated
     except Exception as e:
-        logging.error(f"Error rotating PDF: {e}")
+        error_msg = f"Error rotating PDF: {e}"
+        logging.error(error_msg)
         return page_doc
 
 # === Progress counters ===
-total_count = 0
-done_count = 0
+total_count = len(processed_files)
+done_count   = len(processed_files)
 total_lock = threading.Lock()
 done_lock = threading.Lock()
 
@@ -136,15 +148,16 @@ def process_pdf(pdf_path: str):
         base = os.path.splitext(os.path.basename(pdf_path))[0]
         rel_dir = os.path.relpath(os.path.dirname(pdf_path), WATCH_FOLDER)
         first_under_root = os.path.normpath(rel_dir).lstrip(os.sep).split(os.sep)[0]
-        target_dir = os.path.join(OUTPUT_FOLDER, first_under_root)#rel_dir, base)
+        target_dir = os.path.join(OUTPUT_FOLDER, first_under_root)
         os.makedirs(target_dir, exist_ok=True)
 
         for pno in range(doc.page_count):
             single = fitz.open()
             single.insert_pdf(doc, from_page=pno, to_page=pno)
-            angle = detect_orientation(single)
-            logging.info(f"Page {pno + 1}: detected rotation {angle}°")
-            out_path = os.path.join(target_dir, f"{'_'.join(os.path.normpath(rel_dir).strip(os.sep).split(os.sep)[1:])} - {base} - page_{pno + 1}.pdf")
+            angle = detect_orientation(single, pdf_path, pno)
+            logging.info(f"Page {pno + 1}: detected rotation {angle}° for {pdf_path}")
+            out_fname = f"{'_'.join(os.path.normpath(rel_dir).strip(os.sep).split(os.sep)[1:])} - {base} - page_{pno + 1}.pdf"
+            out_path = os.path.join(target_dir, out_fname)
             if angle:
                 rotated = rotate_pdf(single, angle)
                 rotated.save(out_path)
@@ -172,7 +185,6 @@ def queue_worker():
         job_queue.task_done()
         if pdf_path is None:
             break
-        # increment total before submitting
         increment_total()
         future = executor.submit(process_pdf, pdf_path)
         future.add_done_callback(update_progress)
@@ -229,19 +241,14 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("Shutdown requested, terminating...")
 
-        # Stop watcher
         observer.stop()
         observer.join()
 
-        # Signal queue thread to exit
         job_queue.put(None)
         t_queue.join()
 
-        # Terminate any running workers
         for p in executor._processes.values():
             p.terminate()
-
-        # Shutdown executor immediately
         executor.shutdown(wait=False, cancel_futures=True)
 
         logging.info("All done, exiting.")
