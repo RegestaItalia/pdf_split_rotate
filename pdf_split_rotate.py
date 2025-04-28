@@ -108,9 +108,9 @@ def process_pdf(pdf_path: str):
             single.insert_pdf(doc, from_page=pno, to_page=pno)
 
             angle = detect_orientation(single)
-            logging.info(f"Page {pno+1}: detected rotation {angle}°")
+            logging.info(f"Page {pno + 1}: detected rotation {angle}°")
 
-            out_path = os.path.join(target_dir, f"{base}_page_{pno+1}.pdf")
+            out_path = os.path.join(target_dir, f"{base}_page_{pno + 1}.pdf")
             if angle:
                 rotated = rotate_pdf(single, angle)
                 rotated.save(out_path)
