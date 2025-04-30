@@ -28,7 +28,7 @@ def remove_substring(name: str, parent: str, substring='Documenti ') -> str:
 
 def replace_substring(name: str, parent: str, substring=' - ') -> str:
     if substring in name:
-        return name.replace(substring, '')
+        return name.replace(substring, '_')
     return name
 
 def strip_whitespace(name: str, parent: str) -> str:
