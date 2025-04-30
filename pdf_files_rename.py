@@ -15,9 +15,9 @@ import random
 from pathlib import Path
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────────────
-ROOT_DIR    = Path("/path/to/your/root")  # ← change this to your target folder
+ROOT_DIR    = Path("F:/processed")  # ← change this to your target folder
 SAMPLE_SIZE = 10                          # ← number of random items to preview
-APPLY       = False                       # ← set to True to perform renames
+APPLY       = True                       # ← set to True to perform renames
 # ───────────────────────────────────────────────────────────────────────────────
 
 # ─── Rule definitions ──────────────────────────────────────────────────────────
@@ -52,6 +52,7 @@ def prefix_parent_folder(name: str, parent: str) -> str:
 # apply_to: "both", "file", or "dir"
 rules = [
     (remove_substring,     "file"),
+    (replace_substring,     "file"),
     (strip_whitespace,     "both"),
     (spaces_to_underscore, "both"),
     (to_lowercase,         "both"),
