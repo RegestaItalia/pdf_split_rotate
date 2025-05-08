@@ -46,8 +46,8 @@ def count_pdf_pages(folder: Union[str, Path]) -> int:
     return total_pages
 
 if __name__ == "__main__":
-    root1 = Path("F:/unzipped")
-    root2 = Path("F:/processed")
+    root1 = Path("F:/01_unzipped")
+    root2 = Path("F:/02_processed")
 
     # Get set of customer-folder names in each root
     names1 = {p.name for p in root1.iterdir() if p.is_dir()}

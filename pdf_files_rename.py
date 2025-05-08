@@ -1,132 +1,134 @@
 #!/usr/bin/env python3
 """
-Simple script to recursively clean file and folder names.
+Robust script to recursively clean file and folder names.
 
-CONFIGURE:
-  ROOT_DIR    – the path you want to process
-  SAMPLE_SIZE – how many random items to preview
-  APPLY       – set to True to actually rename after preview
-
-Run with:
-    python clean_names.py
+CONFIGURATION:
+  ROOT_DIR – Path to the target folder
+  APPLY    – If False, only preview changes; if True, preview then confirm before renaming
 """
 import os
-import random
+import re
 from pathlib import Path
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────────────
-ROOT_DIR    = Path("F:/processed")  # ← change this to your target folder
-SAMPLE_SIZE = 10                          # ← number of random items to preview
-APPLY       = True                       # ← set to True to perform renames
+ROOT_DIR = Path("F:/03_checked/DINO CORSINI SRL")  # ← change this to your target folder
+APPLY    = True                    # ← set to True to enable renaming after preview
 # ───────────────────────────────────────────────────────────────────────────────
 
 # ─── Rule definitions ──────────────────────────────────────────────────────────
 def remove_substring(name: str, parent: str, substring='Documenti ') -> str:
-    if substring in name:
-        return name.replace(substring, '')
-    return name
+    return name.replace(substring, '') if substring in name else name
 
 def replace_substring(name: str, parent: str, substring=' - ') -> str:
-    if substring in name:
-        return name.replace(substring, '_')
-    return name
+    return name.replace(substring, '_') if substring in name else name
 
 def strip_whitespace(name: str, parent: str) -> str:
-    """Remove leading/trailing whitespace."""
     return name.strip()
 
 def spaces_to_underscore(name: str, parent: str) -> str:
-    """Convert spaces to underscores."""
     return name.replace(' ', '_')
 
 def to_lowercase(name: str, parent: str) -> str:
-    """Lowercase everything."""
     return name.lower()
 
-def prefix_parent_folder(name: str, parent: str) -> str:
-    """Prepend the immediate parent folder name (if any)."""
-    parent_name = Path(parent).name
-    return f"{parent_name}_{name}" if parent_name else name
+# Uncomment if you want parent prefixing for directories
+# def prefix_parent_folder(name: str, parent: str) -> str:
+#     parent_name = Path(parent).name
+#     return f"{parent_name}_{name}" if parent_name else name
 
-# rules: list of (function, apply_to) tuples.
-# apply_to: "both", "file", or "dir"
+def remove_non_alphanumeric(name: str, parent: str) -> str:
+    base, sep, ext = name.rpartition('.')
+    if sep and ext:
+        cleaned_base = re.sub(r'[^A-Za-z0-9_]', '_', base)
+        cleaned_ext  = re.sub(r'[^A-Za-z0-9_]', '_', ext)
+        return f"{cleaned_base}.{cleaned_ext}"
+    return re.sub(r'[^A-Za-z0-9_]', '_', name)
+
+def remove_duplicate_underscores(name: str, parent: str) -> str:
+    return re.sub(r'_{2,}', '_', name)
+
+# List of (function, apply_to) tuples: "both", "file", or "dir"
 rules = [
-    (remove_substring,     "file"),
-    (replace_substring,     "file"),
-    (strip_whitespace,     "both"),
-    (spaces_to_underscore, "both"),
-    (to_lowercase,         "both"),
-    (prefix_parent_folder, "dir"),    # only apply folder-prefix to directories
+    (remove_substring,       "file"),
+    (replace_substring,      "file"),
+    (strip_whitespace,       "both"),
+    (spaces_to_underscore,   "both"),
+    (to_lowercase,           "both"),
+    # (prefix_parent_folder,   "dir"),
+    (remove_non_alphanumeric,"both"),
+    (remove_duplicate_underscores, "both"),
 ]
 
 def clean_name(name: str, parent: str, kind: str) -> str:
-    """
-    Apply all rules in order to `name`, but only those where
-    apply_to is "both" or matches `kind` ("file" or "dir").
-    """
     for func, apply_to in rules:
-        if apply_to == "both" or apply_to == kind:
+        if apply_to == 'both' or apply_to == kind:
             name = func(name, parent)
     return name
 
-# ─── File‐tree traversal ────────────────────────────────────────────────────────
-def collect_items(root: Path):
+# ─── Collision resolution ───────────────────────────────────────────────────────
+def resolve_collision(dest: Path) -> Path:
     """
-    Walk the directory tree under `root` and collect
-    tuples of (Path, 'file' or 'dir').
+    If `dest` already exists, append _1, _2, ... before the extension until unique.
     """
-    items = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        base = Path(dirpath)
-        for d in dirnames:
-            items.append((base / d, 'dir'))
-        for f in filenames:
-            items.append((base / f, 'file'))
-    return items
+    if not dest.exists():
+        return dest
+    stem = dest.stem
+    suffix = dest.suffix
+    parent = dest.parent
+    i = 1
+    while True:
+        new_name = f"{stem}_{i}{suffix}"
+        candidate = parent / new_name
+        if not candidate.exists():
+            return candidate
+        i += 1
 
 # ─── Preview & Apply ───────────────────────────────────────────────────────────
-def preview_changes(items, sample_size=10):
-    """Print a random sample of proposed renames."""
-    sample = random.sample(items, min(sample_size, len(items)))
-    print(f"\nPreviewing {len(sample)} random changes:")
-    for path, kind in sample:
-        new_name = clean_name(path.name, str(path.parent), kind)
-        print(f"  [{kind}] {path} → {path.parent / new_name}")
-    print()
-
-def apply_changes(items):
+def collect_and_rename(root: Path, dry_run: bool = True):
     """
-    Rename directories (deepest first) then files.
+    Traverse bottom-up: rename files first, then directories.
+    If `dry_run` is True, only print proposed changes.
     """
-    dirs = [(p, k) for p, k in items if k == 'dir']
-    dirs.sort(key=lambda x: len(str(x[0]).split(os.sep)), reverse=True)
-    files = [(p, k) for p, k in items if k == 'file']
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        base = Path(dirpath)
+        # Rename files
+        for fname in filenames:
+            src = base / fname
+            new_name = clean_name(fname, str(base), 'file')
+            if new_name != fname:
+                dest = resolve_collision(base / new_name)
+                if dry_run:
+                    print(f"[DRY RUN] File:\n{src}\n{dest}")
+                else:
+                    src.rename(dest)
+                    print(f"Renamed file:\n{src}\n{dest}")
+        # Rename directories
+        for dname in dirnames:
+            src = base / dname
+            new_name = clean_name(dname, str(base), 'dir')
+            if new_name != dname:
+                dest = resolve_collision(base / new_name)
+                if dry_run:
+                    print(f"[DRY RUN] Dir:\n{src}\n{dest}")
+                else:
+                    src.rename(dest)
+                    print(f"Renamed dir:\n{src}\n{dest}")
 
-    for path, kind in dirs + files:
-        new_name = clean_name(path.name, str(path.parent), kind)
-        new_path = path.parent / new_name
-        if path != new_path:
-            try:
-                path.rename(new_path)
-                print(f"Renamed: {path} → {new_path}")
-            except Exception as e:
-                print(f"Error renaming {path}: {e}")
-
-# ─── Main execution ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     if not ROOT_DIR.is_dir():
         print(f"ERROR: {ROOT_DIR} is not a directory")
         exit(1)
 
-    items = collect_items(ROOT_DIR)
-    preview_changes(items, SAMPLE_SIZE)
+    print(f"Starting dry-run preview under: {ROOT_DIR}\n")
+    collect_and_rename(ROOT_DIR, dry_run=True)
 
     if APPLY:
         confirm = input("Proceed to rename all items? [y/N]: ").strip().lower()
         if confirm == 'y':
-            apply_changes(items)
+            print("\nApplying changes...\n")
+            collect_and_rename(ROOT_DIR, dry_run=False)
             print("\nDone.")
         else:
-            print("Aborted—no changes made.")
+            print("Aborted — no changes made.")
     else:
-        print("APPLY is False, so no changes were made. Set APPLY = True to rename.")
+        print("\nDry-run complete. To apply changes, set APPLY = True and rerun.")
