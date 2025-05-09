@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────────────
-ROOT_DIR = Path("F:/03_checked/DINO CORSINI SRL")  # ← change this to your target folder
+ROOT_DIR = Path("D:/03_checked")  # ← change this to your target folder
 APPLY    = True                    # ← set to True to enable renaming after preview
 # ───────────────────────────────────────────────────────────────────────────────
 
@@ -47,6 +47,9 @@ def remove_non_alphanumeric(name: str, parent: str) -> str:
 def remove_duplicate_underscores(name: str, parent: str) -> str:
     return re.sub(r'_{2,}', '_', name)
 
+def strip_underscores(name: str, parent: str) -> str:
+    return name.strip('_')
+
 # List of (function, apply_to) tuples: "both", "file", or "dir"
 rules = [
     (remove_substring,       "file"),
@@ -57,6 +60,7 @@ rules = [
     # (prefix_parent_folder,   "dir"),
     (remove_non_alphanumeric,"both"),
     (remove_duplicate_underscores, "both"),
+    (strip_underscores, "both"),
 ]
 
 def clean_name(name: str, parent: str, kind: str) -> str:

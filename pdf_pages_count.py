@@ -33,21 +33,23 @@ logger.addHandler(ch)
 
 def count_pdf_pages(folder: Union[str, Path]) -> int:
     """
-    Recursively count all pages in every PDF under `folder`.
+    Recursively count all pages in every PDF under `folder` using metadata only.
     """
     total_pages = 0
     folder = Path(folder)
     for pdf_path in folder.rglob('*.pdf'):
         try:
             reader = PdfReader(str(pdf_path))
-            total_pages += len(reader.pages)
+            # Use the /Count entry from the page tree root instead of loading all pages
+            page_count = reader.trailer['/Root']['/Pages']['/Count']
+            total_pages += page_count
         except Exception as e:
             logger.warning(f"⚠️ Skipping {pdf_path!r}: {e}")
     return total_pages
 
 if __name__ == "__main__":
-    root1 = Path("F:/01_unzipped")
-    root2 = Path("F:/02_processed")
+    root1 = Path("D:/01_unzipped")
+    root2 = Path("D:/02_processed")
 
     # Get set of customer-folder names in each root
     names1 = {p.name for p in root1.iterdir() if p.is_dir()}
@@ -80,3 +82,25 @@ if __name__ == "__main__":
         logger.info(f"{status} {customer}")
         logger.info(f"    • {pages1} pages in {folder1}")
         logger.info(f"    • {pages2} pages in {folder2}")
+        
+        # # If totals don’t match, enumerate exactly which split‐page PDFs are missing
+        # if pages1 != pages2:
+        #     for pdf_path in folder1.rglob('*.pdf'):
+        #         try:
+        #             reader = PdfReader(str(pdf_path))
+        #             page_count = reader.trailer['/Root']['/Pages']['/Count']
+        #         except Exception as e:
+        #             logger.warning(f"⚠️ Unable to read {pdf_path!r} for missing‐page check: {e}")
+        #             continue
+
+        #         missing = []
+        #         base = pdf_path.stem
+        #         for i in range(1, page_count + 1):
+        #             # allow any prefix, but require basename_page_<n>.pdf at the end
+        #             pattern = f"*{base}_page_{i}.pdf"
+        #             if not list(folder2.rglob(pattern)):
+        #                 missing.append(i)
+
+        #         if missing:
+        #             missing_str = ', '.join(str(n) for n in missing)
+        #             logger.info(f"        • Missing pages for {pdf_path.name}: {missing_str}")

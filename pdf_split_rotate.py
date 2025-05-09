@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import time
 import logging
 import threading
@@ -70,32 +71,53 @@ def wait_until_file_is_ready(path: str):
             time.sleep(RETRY_DELAY)
     raise TimeoutError(f"{path} not ready after {RETRIES * RETRY_DELAY}s")
 
+from pytesseract import TesseractError
+
 def detect_orientation(pdf_document, source_path: str, page_no: int, initial_dpi=200, max_trials=3):
     dpi = initial_dpi
     last_rotate = 0
     last_conf = 0
+
     for trial in range(1, max_trials + 1):
         try:
+            # rasterize page → PIL image
             pix = pdf_document[0].get_pixmap(dpi=dpi)
-            img = Image.open(io.BytesIO(pix.tobytes()))
-            osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
-            rotate = osd.get('rotate', 0)
-            conf = osd.get('orientation_conf', 0)
-            logging.debug(f"Trial {trial}: DPI={dpi}, orientation={rotate}, confidence={conf} (File={source_path}, Page={page_no + 1})")
+            png_bytes = pix.tobytes("png")   # ensure it's actual PNG data
+            img = Image.open(io.BytesIO(png_bytes))
+
+            # run OSD
+            try:
+                osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
+                rotate = int(osd.get('rotate', 0) or 0)
+                conf   = float(osd.get('orientation_conf', 0) or 0.0)
+            except TesseractError as te:
+                logging.warning(f"OSD failed for {source_path}, page {page_no+1}: {te}")
+                rotate, conf = 0, 0.0
+
+            logging.debug(f"Trial {trial}: DPI={dpi}, orientation={rotate}, confidence={conf}"
+                          f" (File={source_path}, Page={page_no + 1})")
+
             if conf >= 2:
                 if trial > 1:
-                    logging.info(f"Orientation ({rotate}) stabilized at trial {trial} (DPI={dpi}) with confidence {conf} for {source_path}, page {page_no + 1}")
+                    logging.info(f"Orientation ({rotate}) stabilized at trial {trial}"
+                                 f" (DPI={dpi}, confidence={conf}) {source_path}, page {page_no+1}")
                 return rotate
-            logging.warning(f"Low orientation ({rotate}) confidence ({conf}) at DPI={dpi} for {source_path}, page {page_no + 1}; retrying with higher DPI.")
+
+            # too low confidence → bump DPI and retry
             last_rotate, last_conf = rotate, conf
+            logging.warning(f"Low orientation confidence ({conf:.1f}) at DPI={dpi}"
+                            f" for {source_path}, page {page_no + 1}; retrying with higher DPI.")
             dpi += 100
+
         except Exception as e:
-            err_msg = f"Orientation detection failed on trial {trial} (DPI={dpi}) for {source_path}, page {page_no + 1}: {e}"
-            traceback.print_exc(e)
-            logging.error(err_msg)
+            err_msg = (f"Orientation detection failed on trial {trial} "
+                       f"(DPI={dpi}) for {source_path}, page {page_no + 1}: {e}")
+            logging.error(err_msg, exc_info=True)
             log_error(source_path, err_msg)
             dpi += 100
-    logging.warning(f"Max trials ({max_trials}) reached for {source_path}, page {page_no + 1}. Returning last detected orientation {last_rotate} with confidence {last_conf}")
+
+    logging.warning(f"Max trials reached for {source_path}, page {page_no+1}. "
+                    f"Returning last {last_rotate}° @ confidence {last_conf}")
     return last_rotate
 
 def rotate_pdf(page_doc, rotation_angle):
@@ -150,20 +172,40 @@ def process_pdf(pdf_path: str):
         os.makedirs(target_dir, exist_ok=True)
 
         for pno in range(doc.page_count):
-            single = fitz.open()
-            single.insert_pdf(doc, from_page=pno, to_page=pno)
-            angle = detect_orientation(single, pdf_path, pno)
-            logging.info(f"Page {pno + 1}: detected rotation {angle}° for {pdf_path}")
-            out_fname = f"{'_'.join(os.path.normpath(rel_dir).strip(os.sep).split(os.sep)[1:])} - {base} - page_{pno + 1}.pdf"
-            out_path = os.path.join(target_dir, out_fname)
-            if angle:
-                rotated = rotate_pdf(single, angle)
-                rotated.save(out_path)
-                rotated.close()
-            else:
-                single.save(out_path)
-            single.close()
-            logging.info(f"Saved {out_path}")
+            try:
+                single = fitz.open()
+                single.insert_pdf(doc, from_page=pno, to_page=pno)
+
+                angle = detect_orientation(single, pdf_path, pno)
+                logging.info(f"Page {pno + 1}: detected rotation {angle}° for {pdf_path}")
+
+                out_fname = f"{'_'.join(os.path.normpath(rel_dir).strip(os.sep).split(os.sep)[1:])} - {base} - page_{pno + 1}.pdf"
+                out_path  = os.path.join(target_dir, out_fname)
+
+                if angle:
+                    rotated = rotate_pdf(single, angle)
+                    rotated.save(out_path)
+                    rotated.close()
+                else:
+                    single.save(out_path)
+                single.close()
+
+                logging.info(f"Saved {out_path}")
+
+            except Exception as e:
+                # Log the error but keep going
+                logging.error(f"Error processing page {pno+1} of {pdf_path}: {e}", exc_info=True)
+                log_error(pdf_path, f"Page {pno+1} error: {e}")
+                # Still save the *original* single-page PDF if you want:
+                try:
+                    backup_path = os.path.join(target_dir, f"page_{pno+1}_backup.pdf")
+                    single.save(backup_path)
+                    logging.info(f"Saved backup (unrotated) to {backup_path}")
+                except Exception:
+                    pass
+                finally:
+                    single.close()
+                continue
 
         doc.close()
         append_processed_file(pdf_path)
@@ -227,7 +269,7 @@ if __name__ == "__main__":
         logging.info("Reset processed files list")
 
     observer = Observer()
-    observer.schedule(PDFHandler(), WATCH_FOLDER, recursive=True)
+    observer.schedule(PDFHandler(), Path(WATCH_FOLDER), recursive=True)
     observer.start()
     logging.info(f"Watching {WATCH_FOLDER}")
 
