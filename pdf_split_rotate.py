@@ -222,6 +222,12 @@ def process_pdf(pdf_path: str):
         doc.close()
         append_processed_file(pdf_path)
         logging.info(f"Finished {pdf_path} in {time.time() - start:.2f}s")
+        # Remove source file after successful processing and logging
+        try:
+            os.remove(pdf_path)
+            logging.info(f"Removed source file: {pdf_path}")
+        except Exception as e:
+            logging.warning(f"Failed to remove source file {pdf_path}: {e}")
 
     except Exception as e:
         logging.error(f"Error on {pdf_path}: {e}")
