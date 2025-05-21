@@ -1,122 +1,65 @@
-# PDF Watcher and Processor
+# PDF Split, Rotate & Clean
 
 ## Overview
-This Python script monitors a specified directory (and its subdirectories) for PDF files and automatically processes them by splitting each PDF into individual pages, detecting page orientation using Tesseract OCR, rotating pages if necessary, and saving each page as a separate one-page PDF.
+This project provides a robust Python script (`pdf_split_rotate.py`) to automatically process PDF files in a directory tree. It splits each PDF into single-page files, detects and corrects page orientation using OCR, and saves the results with clean, standardized filenames. The script is designed for batch processing of scanned or messy PDF archives, making them easier to manage and search.
 
-Key features:
-- **Real-time directory watching**: Automatically detects newly added PDF files.
-- **Existing file scan**: Processes existing PDFs in the watch folder on startup.
-- **Orientation detection**: Uses Tesseract OCR to determine rotation angles.
-- **Automatic rotation**: Rotates pages to upright orientation.
-- **Concurrent processing**: Employs a process pool executor for parallel processing.
-- **Tracking**: Maintains a list of processed files to avoid reprocessing.
-- **Error logging**: Logs any processing errors to a dedicated file.
+### Key Features
+- **Recursive directory watching**: Monitors a folder (and subfolders) for new or changed PDF files.
+- **Batch processing**: On startup, processes all existing PDFs in the watch folder.
+- **Page splitting**: Each PDF is split into single-page PDFs.
+- **Automatic rotation**: Uses Tesseract OCR to detect and correct page orientation.
+- **Filename cleaning**: Standardizes output filenames and folder names for consistency.
+- **Parallel processing**: Utilizes multiple CPU cores for fast operation.
+- **Progress tracking**: Keeps a log of processed files to avoid duplicates.
+- **Error and warning logs**: All issues are logged for review.
 
 ## Requirements
+- **Python 3.7+**
+- **Poppler** (for `pdf2image`):
+  - Windows: Download from [Poppler for Windows](http://blog.alivate.com.au/poppler-windows/)
+  - Linux: `sudo apt install poppler-utils`
+- **Tesseract OCR**:
+  - Windows: [UB Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki)
+  - Linux: `sudo apt install tesseract-ocr`
+- **Ghostscript** (optional, for some PDF conversions)
+- Python packages (see `requirements.txt`):
+  - watchdog
+  - PyMuPDF
+  - pdf2image
+  - pytesseract
+  - Pillow
+  - python-dotenv
 
-### Software
-- Python **3.7+**
-- **Poppler** utilities (for `pdf2image`):
-  - Linux: `poppler-utils`
-  - Windows: Download binaries from [Poppler for Windows](http://blog.alivate.com.au/poppler-windows/)
-- **Tesseract OCR** engine:
-  - Linux: `tesseract-ocr`
-  - Windows: Installer from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
-- Ghostscript (optional, can improve PDF handling performance)
-
-### Python Packages
-All Python dependencies are listed in `requirements.txt`:
-```text
-watchdog
-PyMuPDF
-pdf2image
-pytesseract
-Pillow
-python-dotenv
-```
-
-Install them via:
-```bash
-pip install -r requirements.txt
-```
-
-## Installation Guide
-
-### Linux (Ubuntu / Debian)
-1. Update package list:
-    ```bash
-    sudo apt update
-    ```
-2. Install system dependencies:
-    ```bash
-    sudo apt install -y poppler-utils tesseract-ocr libtesseract-dev ghostscript
-    ```
-3. Clone the repository and install Python dependencies:
-    ```bash
-    git clone <your-repo-url>
-    cd <your-repo-name>
-    pip install -r requirements.txt
-    ```
-
-### Windows
-1. Install Python 3.7+ from the [official website](https://www.python.org/downloads/).
-2. Download and install **Poppler for Windows**:
-   - Unzip and add the `bin/` directory to your PATH.
-3. Download and install **Tesseract OCR** from the [UB Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki).
-4. (Optional) Install Ghostscript and add to PATH.
-5. Clone the repository and install Python dependencies:
-    ```powershell
-    git clone <your-repo-url>
-    cd <your-repo-name>
-    pip install -r requirements.txt
-    ```
-
-## Configuration
-
-Below is the example `.env` file located in the project root:
-
-```ini
-# Directory paths
-WATCH_FOLDER = ./input
-OUTPUT_FOLDER = ./output
-PROCESSED_FILE_PATH = ./logs/processed_files.txt
-ERROR_LOG_PATH = ./logs/error_log.txt
-
-# Conf params
-MAX_WORKERS = 12
-RETRIES = 5
-RETRY_DELAY = 1
-
-# Flag to reset processed files tracking (optional)
-RESET_PROGRESS = false
-```
-
-If not provided, default values (shown above) will be used.
+## Installation
+1. Install system dependencies (Poppler, Tesseract, Ghostscript if needed).
+2. Install Python packages:
+   ```powershell
+   pip install -r requirements.txt
+   ```
+3. (Optional) Copy `.env.example` to `.env` and adjust settings as needed.
 
 ## Usage
+1. Edit the `.env` file or set environment variables to configure:
+   - `WATCH_FOLDER`: Folder to monitor for PDFs (default: `./input`)
+   - `OUTPUT_FOLDER`: Where processed PDFs are saved (default: `./output`)
+   - `PROCESSED_FILE_PATH`: Log of processed files (default: `./processed_files.txt`)
+   - `ERROR_LOG_PATH`, `WARNINGS_LOG_PATH`: Log files
+   - `MAX_WORKERS`: Number of parallel processes (default: 4)
+2. Run the script:
+   ```powershell
+   python pdf_split_rotate.py
+   ```
+3. The script will process all PDFs in the watch folder and continue monitoring for new files.
 
-Run the script directly:
-```bash
-python pdf_split_rotate.py
-```
+## Output
+- Each page of every PDF is saved as a separate, correctly rotated PDF in the output folder.
+- Filenames and folder names are cleaned for consistency.
+- Logs are written for errors, warnings, and processed files.
 
-- The script will start watching the `WATCH_FOLDER`.
-- New and existing PDF files will be enqueued and processed.
-- Processed pages will be saved under `OUTPUT_FOLDER` in subdirectories mirroring the input structure.
-- Processing logs will appear in the console.
-- Errors are logged to `ERROR_LOG_PATH`.
+## Troubleshooting
+- Ensure Poppler and Tesseract are installed and available in your system PATH.
+- Check the log files for details on any errors or warnings.
+- For large batches, increase `MAX_WORKERS` for faster processing (CPU dependent).
 
-To reset the processed files list and reprocess all PDFs, set the environment variable:
-```bash
-export RESET_PROGRESS=true
-python pdf_split_rotate.py
-```
-
-## Logging
-
-- **Console logs**: Informational messages about file processing.
-- **Error log**: Detailed errors in `logs/error_log.txt`.
-
-## Contributing
-
-Contributions, bug reports, and feature requests are welcome. Please open an issue or submit a pull request.
+## License
+MIT License. See `LICENSE.md` for details.

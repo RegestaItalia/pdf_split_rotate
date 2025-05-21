@@ -1,8 +1,6 @@
-PyPDF2
 watchdog
 PyMuPDF
 pdf2image
 pytesseract
 Pillow
 python-dotenv
-easyocr

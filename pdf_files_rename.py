@@ -50,6 +50,9 @@ def remove_duplicate_underscores(name: str, parent: str) -> str:
 def strip_underscores(name: str, parent: str) -> str:
     return name.strip('_')
 
+def remove_dots_from_dir(name: str, parent: str) -> str:
+    return name.replace('.', '_')
+
 # List of (function, apply_to) tuples: "both", "file", or "dir"
 rules = [
     (remove_substring,       "file"),
@@ -60,7 +63,8 @@ rules = [
     # (prefix_parent_folder,   "dir"),
     (remove_non_alphanumeric,"both"),
     (remove_duplicate_underscores, "both"),
-    (strip_underscores, "both"),
+    (strip_underscores,      "both"),
+    (remove_dots_from_dir,   "dir"),  # <-- add this rule for directories only
 ]
 
 def clean_name(name: str, parent: str, kind: str) -> str:
@@ -117,22 +121,3 @@ def collect_and_rename(root: Path, dry_run: bool = True):
                 else:
                     src.rename(dest)
                     print(f"Renamed dir:\n{src}\n{dest}")
-
-if __name__ == '__main__':
-    if not ROOT_DIR.is_dir():
-        print(f"ERROR: {ROOT_DIR} is not a directory")
-        exit(1)
-
-    print(f"Starting dry-run preview under: {ROOT_DIR}\n")
-    collect_and_rename(ROOT_DIR, dry_run=True)
-
-    if APPLY:
-        confirm = input("Proceed to rename all items? [y/N]: ").strip().lower()
-        if confirm == 'y':
-            print("\nApplying changes...\n")
-            collect_and_rename(ROOT_DIR, dry_run=False)
-            print("\nDone.")
-        else:
-            print("Aborted — no changes made.")
-    else:
-        print("\nDry-run complete. To apply changes, set APPLY = True and rerun.")

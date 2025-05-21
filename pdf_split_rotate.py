@@ -14,6 +14,7 @@ from PIL import Image
 import io
 from concurrent.futures import ProcessPoolExecutor
 from dotenv import load_dotenv
+from pdf_files_rename import clean_name, resolve_collision
 
 # Load environment variables
 load_dotenv(override=True)
@@ -166,9 +167,16 @@ def process_pdf(pdf_path: str):
     try:
         doc = fitz.open(pdf_path)
         base = os.path.splitext(os.path.basename(pdf_path))[0]
+        # Get relative path from WATCH_FOLDER to PDF's parent
         rel_dir = os.path.relpath(os.path.dirname(pdf_path), WATCH_FOLDER)
-        first_under_root = os.path.normpath(rel_dir).lstrip(os.sep).split(os.sep)[0]
-        target_dir = os.path.join(OUTPUT_FOLDER, first_under_root)
+        # Split into parts
+        rel_parts = os.path.normpath(rel_dir).split(os.sep)
+        # Customer is always the first part
+        customer_folder = rel_parts[0]
+        # All subfolders under customer (may be empty)
+        subfolders = rel_parts[1:] if len(rel_parts) > 1 else []
+        # Clean customer folder name
+        target_dir = os.path.join(OUTPUT_FOLDER, clean_name(customer_folder, OUTPUT_FOLDER, kind="dir"))
         os.makedirs(target_dir, exist_ok=True)
 
         for pno in range(doc.page_count):
@@ -179,15 +187,19 @@ def process_pdf(pdf_path: str):
                 angle = detect_orientation(single, pdf_path, pno)
                 logging.info(f"Page {pno + 1}: detected rotation {angle}° for {pdf_path}")
 
-                out_fname = f"{'_'.join(os.path.normpath(rel_dir).strip(os.sep).split(os.sep)[1:])} - {base} - page_{pno + 1}.pdf"
-                out_path  = os.path.join(target_dir, out_fname)
+                # Flatten subfolders for filename
+                subfolder_part = '_'.join(subfolders) if subfolders else ''
+                parts = [subfolder_part, base, f"page_{pno + 1}.pdf"] if subfolder_part else [base, f"page_{pno + 1}.pdf"]
+                raw_out_fname = '_'.join(parts)
+                cleaned_out_fname = clean_name(raw_out_fname, target_dir, kind="file")
+                out_path = resolve_collision(Path(target_dir) / cleaned_out_fname)
 
                 if angle:
                     rotated = rotate_pdf(single, angle)
-                    rotated.save(out_path)
+                    rotated.save(str(out_path))
                     rotated.close()
                 else:
-                    single.save(out_path)
+                    single.save(str(out_path))
                 single.close()
 
                 logging.info(f"Saved {out_path}")
@@ -198,8 +210,8 @@ def process_pdf(pdf_path: str):
                 log_error(pdf_path, f"Page {pno+1} error: {e}")
                 # Still save the *original* single-page PDF if you want:
                 try:
-                    backup_path = os.path.join(target_dir, f"page_{pno+1}_backup.pdf")
-                    single.save(backup_path)
+                    backup_path = Path(target_dir) / f"page_{pno+1}_backup.pdf"
+                    single.save(str(backup_path))
                     logging.info(f"Saved backup (unrotated) to {backup_path}")
                 except Exception:
                     pass
