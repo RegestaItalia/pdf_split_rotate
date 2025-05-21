@@ -62,15 +62,25 @@ def log_error(path: str, msg: str):
         f.write(f"{ts} - {path} - {msg}\n")
 
 def wait_until_file_is_ready(path: str):
-    for i in range(RETRIES):
+    last_size = -1
+    stable_count = 0
+    for i in range(RETRIES * 2):  # allow more retries for large files
         try:
-            with open(path, 'rb') as f:
-                f.read(1)
-            return
-        except (PermissionError, IOError):
-            logging.info(f"{path} not ready, retry {i + 1}/{RETRIES}")
-            time.sleep(RETRY_DELAY)
-    raise TimeoutError(f"{path} not ready after {RETRIES * RETRY_DELAY}s")
+            size = os.path.getsize(path)
+            if size == last_size and size > 0:
+                stable_count += 1
+            else:
+                stable_count = 0
+            last_size = size
+            # Require file size to be stable for 2 consecutive checks
+            if stable_count >= 2:
+                with open(path, 'rb') as f:
+                    f.read(1)
+                return
+        except (PermissionError, IOError, FileNotFoundError):
+            logging.info(f"{path} not ready, retry {i + 1}/{RETRIES * 2}")
+        time.sleep(RETRY_DELAY)
+    raise TimeoutError(f"{path} not ready after {(RETRIES * 2) * RETRY_DELAY}s")
 
 from pytesseract import TesseractError
 
