@@ -12,7 +12,7 @@ from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image
 import io
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dotenv import load_dotenv
 from pdf_files_rename import clean_name, resolve_collision
 
@@ -172,6 +172,13 @@ def process_pdf(pdf_path: str):
             logging.info(f"{pdf_path} already processed, skipping.")
             return
 
+    try:
+        wait_until_file_is_ready(pdf_path)
+    except Exception as e:
+        logging.error(f"File not ready for processing: {pdf_path}: {e}")
+        log_error(pdf_path, f"File not ready: {e}")
+        return
+
     start = time.time()
     logging.info(f"Processing {pdf_path}")
     try:
@@ -266,17 +273,20 @@ class PDFHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory or not event.src_path.lower().endswith('.pdf'):
             return
-        try:
-            wait_until_file_is_ready(event.src_path)
-            with processed_lock:
-                if event.src_path in processed_files:
-                    return
-            job_queue.put(event.src_path)
-            logging.info(f"Enqueued {event.src_path}")
-        except Exception as e:
-            log_error(event.src_path, str(e))
+        def enqueue_if_needed():
+            try:
+                wait_until_file_is_ready(event.src_path)
+                with processed_lock:
+                    if event.src_path in processed_files:
+                        return
+                job_queue.put(event.src_path)
+                logging.info(f"Enqueued {event.src_path}")
+            except Exception as e:
+                log_error(event.src_path, str(e))
+        threading.Thread(target=enqueue_if_needed, daemon=True).start()
 
 def scan_existing_pdfs(root: str):
+    pdfs_to_enqueue = []
     for dirpath, _, files in os.walk(root):
         for fname in files:
             if fname.lower().endswith('.pdf'):
@@ -284,9 +294,15 @@ def scan_existing_pdfs(root: str):
                 with processed_lock:
                     if full in processed_files:
                         continue
-                wait_until_file_is_ready(full)
-                job_queue.put(full)
-                logging.info(f"Enqueued existing {full}")
+                pdfs_to_enqueue.append(full)
+    def enqueue_file(f):
+        job_queue.put(f)
+        logging.info(f"Enqueued existing {f}")
+    # Parallelize enqueueing
+    pool = ThreadPoolExecutor(max_workers=8)
+    for f in pdfs_to_enqueue:
+        pool.submit(enqueue_file, f)
+    pool.shutdown(wait=True)
 
 if __name__ == "__main__":
     # Optional reset
