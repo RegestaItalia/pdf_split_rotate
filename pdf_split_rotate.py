@@ -29,6 +29,7 @@ RETRIES             = int(os.getenv('FILE_READY_RETRIES', '10'))
 RETRY_DELAY         = float(os.getenv('FILE_READY_DELAY', '1'))
 FILENAME_SEPARATOR  = os.getenv('FILENAME_SEPARATOR', '__EKR__')
 MAX_FILES_PER_GROUP = int(os.getenv('MAX_FILES_PER_GROUP', '10000'))
+REMOVE_SOURCE_FILE = os.getenv('REMOVE_SOURCE_FILE', 'false').lower() == 'true'
 
 # Prepare output folder and logs
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -335,12 +336,13 @@ def process_pdf(pdf_path: str):
         doc.close()
         append_processed_file(pdf_path)
         logging.info(f"Finished {pdf_path} in {time.time() - start:.2f}s")
-        # Remove source file after successful processing and logging
-        try:
-            os.remove(pdf_path)
-            logging.info(f"Removed source file: {pdf_path}")
-        except Exception as e:
-            logging.warning(f"Failed to remove source file {pdf_path}: {e}")
+        # Remove source file after successful processing and logging (configurable)
+        if REMOVE_SOURCE_FILE:
+            try:
+                os.remove(pdf_path)
+                logging.info(f"Removed source file: {pdf_path}")
+            except Exception as e:
+                logging.warning(f"Failed to remove source file {pdf_path}: {e}")
 
     except Exception as e:
         logging.error(f"Error on {pdf_path}: {e}")
