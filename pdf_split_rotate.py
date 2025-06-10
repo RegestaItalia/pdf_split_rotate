@@ -262,20 +262,8 @@ def process_pdf(pdf_path: str):
         customer_folder = rel_parts[0]
         # All subfolders under customer (may be empty)
         subfolders = rel_parts[1:] if len(rel_parts) > 1 else []
-        # Clean customer folder name
-        target_dir = os.path.join(OUTPUT_FOLDER, clean_name(customer_folder, OUTPUT_FOLDER, kind="dir"))
-        os.makedirs(target_dir, exist_ok=True)
-
-        # Clean each part: remove all non-alphanumeric (except extension dot for page)
-        def clean_part(part):
-            if '.' in part:
-                base, dot, ext = part.rpartition('.')
-                return ''.join(c for c in base if c.isalnum()) + dot + ''.join(c for c in ext if c.isalnum())
-            return ''.join(c for c in part if c.isalnum())
-
-        # Clean customer name: remove all non-alphanumeric (no dots, no underscores)
-        customer_clean = ''.join(c for c in customer_folder if c.isalnum())
-        # Use the same cleaned customer name for both folder and filename
+        # Clean customer folder name and use for both folder and filename prefix
+        customer_clean = clean_name(customer_folder, OUTPUT_FOLDER, kind="dir")
         target_dir = os.path.join(OUTPUT_FOLDER, customer_clean)
         os.makedirs(target_dir, exist_ok=True)
 

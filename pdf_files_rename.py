@@ -76,8 +76,10 @@ def clean_name(name: str, parent: str, kind: str) -> str:
     """
     if kind == 'file' and '.' in name:
         base, dot, ext = name.rpartition('.')
-        return ''.join(c for c in base if c.isalnum()) + dot + ''.join(c for c in ext if c.isalnum())
-    return ''.join(c for c in name if c.isalnum())
+        cleaned = ''.join(c for c in base if c.isalnum()) + dot + ''.join(c for c in ext if c.isalnum())
+    else:
+        cleaned = ''.join(c for c in name if c.isalnum())
+    return cleaned.lower()
 
 def resolve_collision(dest: Path) -> Path:
     """
