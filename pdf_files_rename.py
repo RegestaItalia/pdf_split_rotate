@@ -68,16 +68,16 @@ rules: List[Rule] = [
 
 def clean_name(name: str, parent: str, kind: str) -> str:
     """
-    Clean a file or directory name by applying a sequence of rules.
+    Clean a file or directory name by applying a strict rule: remove all non-alphanumeric characters (except for the extension dot in files).
     :param name: The original file or directory name.
     :param parent: The parent directory path as a string.
     :param kind: Either 'file' or 'dir'.
     :return: The cleaned name.
     """
-    for func, applies_to in rules:
-        if applies_to == 'both' or applies_to == kind:
-            name = func(name, parent)
-    return name
+    if kind == 'file' and '.' in name:
+        base, dot, ext = name.rpartition('.')
+        return ''.join(c for c in base if c.isalnum()) + dot + ''.join(c for c in ext if c.isalnum())
+    return ''.join(c for c in name if c.isalnum())
 
 def resolve_collision(dest: Path) -> Path:
     """
