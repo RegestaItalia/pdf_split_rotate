@@ -26,6 +26,7 @@ WARNINGS_LOG_PATH   = os.path.abspath(os.getenv('WARNINGS_LOG_PATH', './warnings
 MAX_WORKERS         = int(os.getenv('MAX_WORKERS', '4'))
 RETRIES             = int(os.getenv('FILE_READY_RETRIES', '10'))
 RETRY_DELAY         = float(os.getenv('FILE_READY_DELAY', '1'))
+FILENAME_SEPARATOR  = os.getenv('FILENAME_SEPARATOR', '__EKR__')
 
 # Prepare output folder and logs
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -207,7 +208,7 @@ def process_pdf(pdf_path: str):
                 # Flatten subfolders for filename
                 subfolder_part = '_'.join(subfolders) if subfolders else ''
                 parts = [subfolder_part, base, f"page_{pno + 1}.pdf"] if subfolder_part else [base, f"page_{pno + 1}.pdf"]
-                raw_out_fname = '_'.join(parts)
+                raw_out_fname = FILENAME_SEPARATOR.join(parts)
                 cleaned_out_fname = clean_name(raw_out_fname, target_dir, kind="file")
                 out_path = resolve_collision(Path(target_dir) / cleaned_out_fname)
 
