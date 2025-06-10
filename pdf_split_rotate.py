@@ -214,25 +214,33 @@ def get_next_group_dir_with_lock(target_dir, max_files_per_group, lock_timeout=1
         lock_path = os.path.join(group_dir, '.group.lock')
         start_time = time.time()
         # Try to acquire lock
-        while True:
-            try:
-                # Try to create the lock file exclusively
-                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
-                break  # Lock acquired
-            except FileExistsError:
-                # Lock file exists, wait and retry
-                if time.time() - start_time > lock_timeout:
-                    raise TimeoutError(f"Timeout waiting for lock on {group_dir}")
-                time.sleep(0.05)
+        lock_acquired = False
         try:
-            num_files = len([f for f in os.listdir(group_dir)
-                             if os.path.isfile(os.path.join(group_dir, f)) and not f.endswith('.lock')])
+            while True:
+                try:
+                    # Try to create the lock file exclusively
+                    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.close(fd)
+                    lock_acquired = True
+                    break  # Lock acquired
+                except FileExistsError:
+                    # Lock file exists, wait and retry
+                    if time.time() - start_time > lock_timeout:
+                        raise TimeoutError(f"Timeout waiting for lock on {group_dir}")
+                    time.sleep(0.05)
+            num_files = len([
+                f for f in os.listdir(group_dir)
+                if os.path.isfile(os.path.join(group_dir, f)) and not f.endswith('.lock')
+            ])
             if num_files < max_files_per_group:
                 return group_dir, lock_path
         finally:
-            # Always release the lock if not returning this group
-            os.remove(lock_path)
+            # Only remove the lock if we acquired it and are NOT returning this group
+            if lock_acquired and (num_files >= max_files_per_group):
+                try:
+                    os.remove(lock_path)
+                except FileNotFoundError:
+                    pass
         group_num += 1
 
 # The processing function
