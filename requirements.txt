@@ -4,4 +4,3 @@ pdf2image
 pytesseract
 Pillow
 python-dotenv
-psutil

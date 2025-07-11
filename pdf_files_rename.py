@@ -1,35 +1,35 @@
-"""File utilities for name cleaning and collision resolution."""
+#!/usr/bin/env python3
+"""
+Robust script to recursively clean file and folder names.
 
+CONFIGURATION:
+  ROOT_DIR – Path to the target folder
+  APPLY    – If False, only preview changes; if True, preview then confirm before renaming
+"""
 import re
 from pathlib import Path
 from typing import Callable, List, Tuple
-
 
 # ─── Rule Definitions ─────────────────────────────────────────────────────────
 def remove_substring(name: str, parent: str, substring: str = 'Documenti ') -> str:
     """Remove a specific substring from the name."""
     return name.replace(substring, '') if substring in name else name
 
-
 def replace_substring(name: str, parent: str, substring: str = ' - ') -> str:
     """Replace a specific substring with an underscore."""
     return name.replace(substring, '_') if substring in name else name
-
 
 def strip_whitespace(name: str, parent: str) -> str:
     """Strip leading and trailing whitespace."""
     return name.strip()
 
-
 def spaces_to_underscore(name: str, parent: str) -> str:
     """Replace spaces with underscores."""
     return name.replace(' ', '_')
 
-
 def to_lowercase(name: str, parent: str) -> str:
     """Convert name to lowercase."""
     return name.lower()
-
 
 def remove_non_alphanumeric(name: str, parent: str) -> str:
     """Replace non-alphanumeric characters (except underscore and dot) with underscores."""
@@ -40,21 +40,17 @@ def remove_non_alphanumeric(name: str, parent: str) -> str:
         return f"{cleaned_base}.{cleaned_ext}"
     return re.sub(r'[^A-Za-z0-9_]', '_', name)
 
-
 def remove_duplicate_underscores(name: str, parent: str) -> str:
     """Replace multiple consecutive underscores with a single underscore."""
     return re.sub(r'_{2,}', '_', name)
-
 
 def strip_underscores(name: str, parent: str) -> str:
     """Strip leading and trailing underscores."""
     return name.strip('_')
 
-
 def remove_dots_from_dir(name: str, parent: str) -> str:
     """Replace dots with underscores (for directories only)."""
     return name.replace('.', '_')
-
 
 # Each rule is a tuple: (function, applies_to), where applies_to is 'file', 'dir', or 'both'
 Rule = Tuple[Callable[[str, str], str], str]
@@ -70,7 +66,6 @@ rules: List[Rule] = [
     (remove_dots_from_dir, 'dir'),
 ]
 
-
 def clean_name(name: str, parent: str, kind: str) -> str:
     """
     Clean a file or directory name by applying a strict rule: remove all non-alphanumeric characters (except for the extension dot in files).
@@ -85,7 +80,6 @@ def clean_name(name: str, parent: str, kind: str) -> str:
     else:
         cleaned = ''.join(c for c in name if c.isalnum())
     return cleaned.lower()
-
 
 def resolve_collision(dest: Path) -> Path:
     """
