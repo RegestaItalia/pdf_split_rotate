@@ -281,9 +281,58 @@ def process_pdf(pdf_path: str):
         for pno in range(doc.page_count):
             single = fitz.open()
             try:
-                single.insert_pdf(doc, from_page=pno, to_page=pno)
+                logging.info(f"Attempting to extract page {pno+1} from {pdf_path} (doc.page_count={doc.page_count})")
+                fallback_used = False
+                try:
+                    single.insert_pdf(doc, from_page=pno, to_page=pno)
+                except IndexError as ie:
+                    logging.warning(f"insert_pdf failed for {pdf_path} page {pno+1} (doc.page_count={doc.page_count}): {ie}. Fallback to image-based PDF.")
+                    # Fallback: render page to image and create PDF in memory
+                    try:
+                        page = doc.load_page(pno)
+                        pix = page.get_pixmap(dpi=200)
+                        img_bytes = pix.tobytes("png")
+                        img = Image.open(io.BytesIO(img_bytes))
+                        fallback_pdf = fitz.open()
+                        rect = fitz.Rect(0, 0, img.width, img.height)
+                        pdf_page = fallback_pdf.new_page(width=img.width, height=img.height)
+                        pdf_page.insert_image(rect, stream=img_bytes)
+                        single.close()
+                        single = fallback_pdf
+                        fallback_used = True
+                        logging.info(f"Fallback PDF created for {pdf_path} page {pno+1} (image-based)")
+                    except Exception as fallback_e:
+                        logging.error(f"Fallback failed for {pdf_path} page {pno+1}: {fallback_e}")
+                        log_error(pdf_path, f"Page {pno+1} error: Fallback failed after insert_pdf IndexError: {fallback_e}")
+                        single.close()
+                        continue
+                logging.info(f"After insert: single has {single.page_count} pages (expected 1)")
+                if single.page_count == 0:
+                    logging.warning(f"insert_pdf produced empty doc for {pdf_path} page {pno+1} (doc.page_count={doc.page_count}). Fallback to image-based PDF.")
+                    # Fallback: render page to image and create PDF in memory
+                    try:
+                        page = doc.load_page(pno)
+                        pix = page.get_pixmap(dpi=200)
+                        img_bytes = pix.tobytes("png")
+                        img = Image.open(io.BytesIO(img_bytes))
+                        fallback_pdf = fitz.open()
+                        rect = fitz.Rect(0, 0, img.width, img.height)
+                        pdf_page = fallback_pdf.new_page(width=img.width, height=img.height)
+                        pdf_page.insert_image(rect, stream=img_bytes)
+                        single.close()
+                        single = fallback_pdf
+                        fallback_used = True
+                        logging.info(f"Fallback PDF created for {pdf_path} page {pno+1} (image-based)")
+                    except Exception as fallback_e:
+                        logging.error(f"Fallback failed for {pdf_path} page {pno+1}: {fallback_e}")
+                        log_error(pdf_path, f"Page {pno+1} error: Fallback failed after empty doc: {fallback_e}")
+                        single.close()
+                        continue
                 angle = detect_orientation(single, pdf_path, pno)
-                logging.info(f"Page {pno + 1}: detected rotation {angle}° for {pdf_path}")
+                if fallback_used:
+                    logging.info(f"Page {pno + 1}: detected rotation {angle}° for {pdf_path} (fallback image-based PDF)")
+                else:
+                    logging.info(f"Page {pno + 1}: detected rotation {angle}° for {pdf_path}")
 
                 # --- GROUP LOGIC WITH LOCK ---
                 group_dir, lock_path = get_next_group_dir_with_lock(target_dir, MAX_FILES_PER_GROUP)
