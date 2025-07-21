@@ -11,10 +11,12 @@ import fitz  # PyMuPDF
 from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = 178956970 * 3
+
 import io
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dotenv import load_dotenv
-from pdf_files_rename import clean_name, resolve_collision
+from pdf_files_rename import clean_name
 from collections import defaultdict
 
 # Load environment variables
@@ -181,9 +183,9 @@ def initialize_customer_groups():
         group_counts = {}
         for entry in os.listdir(customer_path):
             entry_path = os.path.join(customer_path, entry)
-            if entry.startswith('group_') and os.path.isdir(entry_path):
+            if entry.startswith('group') and os.path.isdir(entry_path):
                 try:
-                    group_num = int(entry.split('_')[1])
+                    group_num = int(entry.replace('group', ''))
                 except Exception:
                     continue
                 group_numbers.append(group_num)
@@ -198,7 +200,7 @@ def initialize_customer_groups():
 def get_next_group_dir(target_dir, max_files_per_group):
     group_num = 1
     while True:
-        group_dir = os.path.join(target_dir, f'group_{group_num}')
+        group_dir = os.path.join(target_dir, f'group{group_num}')
         os.makedirs(group_dir, exist_ok=True)
         num_files = len([f for f in os.listdir(group_dir) if os.path.isfile(os.path.join(group_dir, f))])
         if num_files < max_files_per_group:
@@ -210,7 +212,7 @@ import time
 def get_next_group_dir_with_lock(target_dir, max_files_per_group, lock_timeout=10):
     group_num = 1
     while True:
-        group_dir = os.path.join(target_dir, f'group_{group_num}')
+        group_dir = os.path.join(target_dir, f'group{group_num}')
         os.makedirs(group_dir, exist_ok=True)
         lock_path = os.path.join(group_dir, '.group.lock')
         start_time = time.time()
@@ -280,7 +282,6 @@ def process_pdf(pdf_path: str):
             single = fitz.open()
             try:
                 single.insert_pdf(doc, from_page=pno, to_page=pno)
-
                 angle = detect_orientation(single, pdf_path, pno)
                 logging.info(f"Page {pno + 1}: detected rotation {angle}° for {pdf_path}")
 
@@ -289,46 +290,49 @@ def process_pdf(pdf_path: str):
                 group_name = os.path.basename(group_dir)
                 group_clean = ''.join(c for c in group_name if c.isalnum())
 
-                # Clean each subfolder part individually, then join with underscores
                 subfolder_clean = '_'.join(''.join(c for c in part if c.isalnum()) for part in subfolders) if subfolders else ''
                 base_clean = ''.join(c for c in base if c.isalnum())
-                page_clean = f"page{pno+1}.pdf"
-
-                # Build filename: customer+group, then separator, then rest with underscores
                 customer_group = f"{customer_clean}_{group_clean}{FILENAME_SEPARATOR}"
-                # Remove underscore between base_clean and page_clean
                 if subfolder_clean:
                     name_parts = [subfolder_clean, f"{base_clean}page-{pno+1}.pdf"]
                 else:
                     name_parts = [f"{base_clean}page-{pno+1}.pdf"]
                 raw_out_fname = customer_group + '_'.join(name_parts)
-                out_path = resolve_collision(Path(group_dir) / raw_out_fname)
+                out_path = Path(group_dir) / raw_out_fname
 
+                saved = False
                 if angle:
                     rotated = rotate_pdf(single, angle)
-                    rotated.save(str(out_path))
+                    if not out_path.exists():
+                        rotated.save(str(out_path))
+                        logging.info(f"Saved rotated page {pno+1} to {out_path}")
+                        saved = True
+                    else:
+                        logging.warning(f"Rotated page {pno+1} not saved, file already exists: {out_path}")
                     rotated.close()
                 else:
-                    single.save(str(out_path))
+                    if not out_path.exists():
+                        single.save(str(out_path))
+                        logging.info(f"Saved unrotated page {pno+1} to {out_path}")
+                        saved = True
+                    else:
+                        logging.warning(f"Unrotated page {pno+1} not saved, file already exists: {out_path}")
                 single.close()
 
-                # Release the lock after writing
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
 
-                logging.info(f"Saved {out_path}")
+                if saved:
+                    logging.info(f"Saved {out_path}")
 
             except Exception as e:
-                # On error, save the unrotated page in the group folder with normal naming
                 msg = str(e)
                 if 'Permission denied' in msg or 'Timeout' in msg or 'lock' in msg:
                     logging.info(f"Transient error processing page {pno+1} of {pdf_path}: {e}")
                 else:
                     logging.error(f"Error processing page {pno+1} of {pdf_path}: {e}", exc_info=True)
                     log_error(pdf_path, f"Page {pno+1} error: {e}")
-                # Try to save the unrotated page in the group folder with normal naming
                 try:
-                    # --- GROUP LOGIC WITH LOCK ---
                     group_dir, lock_path = get_next_group_dir_with_lock(target_dir, MAX_FILES_PER_GROUP)
                     group_name = os.path.basename(group_dir)
                     group_clean = ''.join(c for c in group_name if c.isalnum())
@@ -340,9 +344,12 @@ def process_pdf(pdf_path: str):
                     else:
                         name_parts = [f"{base_clean}page-{pno+1}.pdf"]
                     raw_out_fname = customer_group + '_'.join(name_parts)
-                    out_path = resolve_collision(Path(group_dir) / raw_out_fname)
-                    single.save(str(out_path))
-                    logging.info(f"Saved (unrotated, error) {out_path}")
+                    out_path = Path(group_dir) / raw_out_fname
+                    if not out_path.exists():
+                        single.save(str(out_path))
+                        logging.info(f"Saved (unrotated, error) {out_path}")
+                    else:
+                        logging.warning(f"(Unrotated, error) page {pno+1} not saved, file already exists: {out_path}")
                     if os.path.exists(lock_path):
                         os.remove(lock_path)
                 except Exception as e2:
