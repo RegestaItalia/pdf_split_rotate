@@ -1,106 +1,123 @@
-# Requires: pip install tabulate PyPDF2
-import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Union
-from PyPDF2 import PdfReader
-from PyPDF2.errors import PdfReadWarning
-from tabulate import tabulate
-import warnings
+import threading
+from tqdm import tqdm
+import queue
+import time
+from datetime import datetime
 
-warnings.filterwarnings("ignore", category=PdfReadWarning)
+def scan_directory(directory, file_queue, progress_bar, lock):
+    """Scan a directory and add files to queue."""
+    try:
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                file_queue.put(os.path.join(root, file))
+                with lock:
+                    progress_bar.update(1)
+    except Exception as e:
+        print(f"Error scanning {directory}: {e}")
 
-# --- Logging setup ---
-LOG_DIR = Path('logs')
-LOG_DIR.mkdir(exist_ok=True)
-LOG_FILE = LOG_DIR / 'check.txt'
+def scan_directories_parallel(root_directory):
+    """Parallel directory scanning with dynamic progress bar."""
+    file_queue = queue.Queue()
+    lock = threading.Lock()
+    
+    # Get immediate subdirectories
+    subdirs = []
+    try:
+        for item in os.listdir(root_directory):
+            path = os.path.join(root_directory, item)
+            if os.path.isdir(path):
+                subdirs.append(path)
+    except Exception as e:
+        print(f"Error listing directory: {e}")
+        return []
+    
+    if not subdirs:
+        subdirs = [root_directory]  # Scan root if no subdirs
+    
+    print(f"Scanning {len(subdirs)} directories in parallel...")
+    
+    with tqdm(desc="Files found", unit="files", dynamic_ncols=True) as pbar:
+        with ThreadPoolExecutor(max_workers=min(20, len(subdirs))) as executor:
+            futures = [executor.submit(scan_directory, subdir, file_queue, pbar, lock) 
+                      for subdir in subdirs]
+            
+            # Wait for all scanning to complete
+            for future in as_completed(futures):
+                future.result()
+    
+    # Convert queue to list
+    files = []
+    while not file_queue.empty():
+        files.append(file_queue.get())
+    
+    return files
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# File handler
-fh = logging.FileHandler(LOG_FILE, mode='w', encoding='utf-8')
-fh.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s | %(levelname)-7s | %(message)s')
-fh.setFormatter(formatter)
-logger.addHandler(fh)
-
-# Console handler
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-ch.setFormatter(formatter)
-logger.addHandler(ch)
-# ---------------------
-
-def count_pdf_pages(folder: Union[str, Path]) -> int:
-    """
-    Recursively count all pages in every PDF under `folder` using metadata only.
-    """
-    total_pages = 0
-    folder = Path(folder)
-    for pdf_path in folder.rglob('*.pdf'):
-        try:
-            reader = PdfReader(str(pdf_path))
-            # Use the /Count entry from the page tree root instead of loading all pages
-            page_count = reader.trailer['/Root']['/Pages']['/Count']
-            total_pages += page_count
-        except Exception as e:
-            logger.warning(f"⚠️ Skipping {pdf_path!r}: {e}")
-    return total_pages
+def main():
+    # Set your directory path here
+    directory = 'W:/03_processati'
+    
+    if not os.path.exists(directory):
+        print("Directory not found!")
+        return
+    
+    print("Scanning directory structure...")
+    all_files = scan_directories_parallel(directory)
+    
+    if not all_files:
+        print("No files found!")
+        return
+    
+    # Count file types and folders
+    file_types = {}
+    folder_counts = {}
+    
+    for file_path in all_files:
+        # File type counting
+        ext = os.path.splitext(file_path)[1].lower()
+        if not ext:
+            ext = '<no extension>'
+        file_types[ext] = file_types.get(ext, 0) + 1
+        
+        # Folder counting
+        folder = os.path.dirname(file_path)
+        folder_counts[folder] = folder_counts.get(folder, 0) + 1
+    
+    # Print summary
+    print(f"\n--- FILE COUNT SUMMARY ---")
+    print(f"Total files found: {len(all_files):,}")
+    print(f"\nFile types breakdown:")
+    for ext, count in sorted(file_types.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {ext}: {count:,}")
+    
+    print(f"\nTop folders by file count:")
+    for folder, count in sorted(folder_counts.items(), key=lambda x: x[0]):
+        print(f"  {folder}: {count:,}")
+        
+    # Log to file
+    log_dir = "logs/count"
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"file_count_{timestamp}.txt")
+    
+    with open(log_file, 'w', encoding='utf-8') as f:
+        f.write(f"File Count Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Directory: {directory}\n")
+        f.write(f"=" * 60 + "\n\n")
+        f.write(f"Total files found: {len(all_files):,}\n")
+        f.write(f"Total folders: {len(folder_counts):,}\n\n")
+        
+        f.write("File types breakdown:\n")
+        for ext, count in sorted(file_types.items(), key=lambda x: x[1], reverse=True):
+            f.write(f"  {ext}: {count:,}\n")
+        
+        f.write("\nFolders by file count:\n")
+        for folder, count in sorted(folder_counts.items(), key=lambda x: x[0]):
+            f.write(f"  {folder}: {count:,}\n")
+    
+    print(f"\nResults logged to: {log_file}")
 
 if __name__ == "__main__":
-    root1 = Path("D:/01_unzipped")
-    root2 = Path("D:/02_processed")
-
-    # Get set of customer-folder names in each root
-    names1 = {p.name for p in root1.iterdir() if p.is_dir()}
-    names2 = {p.name for p in root2.iterdir() if p.is_dir()}
-
-    # Build a sorted list of all customer names present in either root
-    all_customers = sorted(names1 | names2)
-
-    # Prepare presence table rows
-    rows = []
-    for customer in all_customers:
-        in1 = '✅' if customer in names1 else '❌'
-        in2 = '✅' if customer in names2 else '❌'
-        rows.append([in1, customer, in2])
-
-    # Log the presence table
-    table = tabulate(rows, headers=[str(root1), "customer_folder", str(root2)], tablefmt="github")
-    logger.info("Customer-folder presence:\n" + table)
-
-    # Compare page counts for common customers
-    logger.info("Page counts for common customers:")
-    for customer in sorted(names1 & names2):
-        folder1 = root1 / customer
-        folder2 = root2 / customer
-
-        pages1 = count_pdf_pages(folder1)
-        pages2 = count_pdf_pages(folder2)
-
-        status = "✅" if pages1 == pages2 else "❌"
-        logger.info(f"{status} {customer}")
-        logger.info(f"    • {pages1} pages in {folder1}")
-        logger.info(f"    • {pages2} pages in {folder2}")
-        
-        # # If totals don’t match, enumerate exactly which split‐page PDFs are missing
-        # if pages1 != pages2:
-        #     for pdf_path in folder1.rglob('*.pdf'):
-        #         try:
-        #             reader = PdfReader(str(pdf_path))
-        #             page_count = reader.trailer['/Root']['/Pages']['/Count']
-        #         except Exception as e:
-        #             logger.warning(f"⚠️ Unable to read {pdf_path!r} for missing‐page check: {e}")
-        #             continue
-
-        #         missing = []
-        #         base = pdf_path.stem
-        #         for i in range(1, page_count + 1):
-        #             # allow any prefix, but require basename_page_<n>.pdf at the end
-        #             pattern = f"*{base}_page_{i}.pdf"
-        #             if not list(folder2.rglob(pattern)):
-        #                 missing.append(i)
-
-        #         if missing:
-        #             missing_str = ', '.join(str(n) for n in missing)
-        #             logger.info(f"        • Missing pages for {pdf_path.name}: {missing_str}")
+    main()
