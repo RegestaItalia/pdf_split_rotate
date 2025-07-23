@@ -33,6 +33,14 @@ FILENAME_SEPARATOR  = os.getenv('FILENAME_SEPARATOR', '__EKR__')
 MAX_FILES_PER_GROUP = int(os.getenv('MAX_FILES_PER_GROUP', '10000'))
 REMOVE_SOURCE_FILE = os.getenv('REMOVE_SOURCE_FILE', 'false').lower() == 'true'
 
+# Load supported file extensions from environment
+process_extensions_str = os.getenv('PROCESS_EXTENSIONS', '.pdf,.tif,.tiff,.png,.jpg,.jpeg')
+PROCESS_EXTENSIONS = tuple(ext.strip().lower() for ext in process_extensions_str.split(',') if ext.strip())
+
+# Separate PDF and image extensions for routing
+PDF_EXTENSIONS = ('.pdf',)
+IMAGE_EXTENSIONS = tuple(ext for ext in PROCESS_EXTENSIONS if ext not in PDF_EXTENSIONS)
+
 # Prepare output folder and logs
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 # Ensure warnings log exists
@@ -90,7 +98,58 @@ def wait_until_file_is_ready(path: str):
 
 from pytesseract import TesseractError
 
+def detect_orientation_from_image(img: Image.Image, source_path: str, page_no: int, initial_dpi=200, max_trials=3):
+    """Detect orientation from a PIL Image using OCR"""
+    last_rotate = 0
+    last_conf = 0
+
+    for trial in range(1, max_trials + 1):
+        try:
+            # If we're on a retry, upscale the image to simulate higher DPI
+            current_img = img
+            if trial > 1:
+                scale_factor = 1 + (trial - 1) * 0.5  # 1.0, 1.5, 2.0 for trials 1, 2, 3
+                new_width = int(img.width * scale_factor)
+                new_height = int(img.height * scale_factor)
+                current_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            # run OSD
+            try:
+                osd = pytesseract.image_to_osd(current_img, output_type=pytesseract.Output.DICT)
+                rotate = int(osd.get('rotate', 0) or 0)
+                conf   = float(osd.get('orientation_conf', 0) or 0.0)
+            except TesseractError as te:
+                logging.warning(f"OSD failed for {source_path}, page {page_no+1}: {te}")
+                rotate, conf = 0, 0.0
+
+            effective_dpi = initial_dpi * (1 + (trial - 1) * 0.5)
+            logging.debug(f"Trial {trial}: effective_DPI={effective_dpi:.0f}, orientation={rotate}, confidence={conf}"
+                          f" (File={source_path}, Page={page_no + 1})")
+
+            if conf >= 2:
+                if trial > 1:
+                    logging.info(f"Orientation ({rotate}) stabilized at trial {trial}"
+                                 f" (effective_DPI={effective_dpi:.0f}, confidence={conf}) {source_path}, page {page_no+1}")
+                return rotate
+
+            # too low confidence → retry with upscaled image
+            last_rotate, last_conf = rotate, conf
+            logging.warning(f"Low orientation confidence ({conf:.1f}) at effective_DPI={effective_dpi:.0f}"
+                            f" for {source_path}, page {page_no + 1}; retrying with higher resolution.")
+
+        except Exception as e:
+            effective_dpi = initial_dpi * (1 + (trial - 1) * 0.5)
+            err_msg = (f"Orientation detection failed on trial {trial} "
+                       f"(effective_DPI={effective_dpi:.0f}) for {source_path}, page {page_no + 1}: {e}")
+            logging.error(err_msg, exc_info=True)
+            log_error(source_path, err_msg)
+
+    logging.warning(f"Max trials reached for {source_path}, page {page_no+1}. "
+                    f"Returning last {last_rotate}° @ confidence {last_conf}")
+    return last_rotate
+
 def detect_orientation(pdf_document, source_path: str, page_no: int, initial_dpi=200, max_trials=3):
+    """Detect orientation from PDF document by converting to image first"""
     dpi = initial_dpi
     last_rotate = 0
     last_conf = 0
@@ -102,29 +161,8 @@ def detect_orientation(pdf_document, source_path: str, page_no: int, initial_dpi
             png_bytes = pix.tobytes("png")   # ensure it's actual PNG data
             img = Image.open(io.BytesIO(png_bytes))
 
-            # run OSD
-            try:
-                osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
-                rotate = int(osd.get('rotate', 0) or 0)
-                conf   = float(osd.get('orientation_conf', 0) or 0.0)
-            except TesseractError as te:
-                logging.warning(f"OSD failed for {source_path}, page {page_no+1}: {te}")
-                rotate, conf = 0, 0.0
-
-            logging.debug(f"Trial {trial}: DPI={dpi}, orientation={rotate}, confidence={conf}"
-                          f" (File={source_path}, Page={page_no + 1})")
-
-            if conf >= 2:
-                if trial > 1:
-                    logging.info(f"Orientation ({rotate}) stabilized at trial {trial}"
-                                 f" (DPI={dpi}, confidence={conf}) {source_path}, page {page_no+1}")
-                return rotate
-
-            # too low confidence → bump DPI and retry
-            last_rotate, last_conf = rotate, conf
-            logging.warning(f"Low orientation confidence ({conf:.1f}) at DPI={dpi}"
-                            f" for {source_path}, page {page_no + 1}; retrying with higher DPI.")
-            dpi += 100
+            # Use the shared image-based detection
+            return detect_orientation_from_image(img, source_path, page_no, dpi, 1)  # Single trial since we control DPI here
 
         except Exception as e:
             err_msg = (f"Orientation detection failed on trial {trial} "
@@ -169,7 +207,7 @@ def update_progress(_future):
     with done_lock:
         done_count += 1
         pct = (done_count / total_count * 100) if total_count else 0
-        logging.info(f"Progress: {done_count}/{total_count} PDFs processed ({pct:.1f}%)")
+        logging.info(f"Progress: {done_count}/{total_count} files processed ({pct:.1f}%)")
 
 # Track per-customer group state: customer -> (group_number, count_in_group)
 customer_group_state = {}
@@ -247,6 +285,165 @@ def get_next_group_dir_with_lock(target_dir, max_files_per_group, lock_timeout=1
         group_num += 1
 
 # The processing function
+def process_image(image_path: str):
+    """Process image files (including multi-page TIFFs) - convert to rotated PDFs"""
+    with processed_lock:
+        if image_path in processed_files:
+            logging.info(f"{image_path} already processed, skipping.")
+            return
+
+    try:
+        wait_until_file_is_ready(image_path)
+    except Exception as e:
+        logging.error(f"File not ready for processing: {image_path}: {e}")
+        log_error(image_path, f"File not ready: {e}")
+        return
+
+    start = time.time()
+    logging.info(f"Processing {image_path}")
+    try:
+        # Open image and check if it's multi-page (TIFF)
+        with Image.open(image_path) as img:
+            is_multipage = hasattr(img, 'n_frames') and img.n_frames > 1
+            total_pages = img.n_frames if is_multipage else 1
+            
+            base = os.path.splitext(os.path.basename(image_path))[0]
+            # Get relative path from WATCH_FOLDER to image's parent
+            rel_dir = os.path.relpath(os.path.dirname(image_path), WATCH_FOLDER)
+            # Split into parts
+            rel_parts = os.path.normpath(rel_dir).split(os.sep)
+            # Customer is always the first part
+            customer_folder = rel_parts[0]
+            # All subfolders under customer (may be empty)
+            subfolders = rel_parts[1:] if len(rel_parts) > 1 else []
+            # Clean customer folder name and use for both folder and filename prefix
+            customer_clean = clean_name(customer_folder, OUTPUT_FOLDER, kind="dir")
+            target_dir = os.path.join(OUTPUT_FOLDER, customer_clean)
+            os.makedirs(target_dir, exist_ok=True)
+
+            for page_idx in range(total_pages):
+                try:
+                    # For multi-page images, seek to the specific frame
+                    if is_multipage:
+                        img.seek(page_idx)
+                        logging.info(f"Processing page {page_idx+1}/{total_pages} from {image_path}")
+                    
+                    # Convert image to RGB if needed (for PDF compatibility)
+                    page_img = img.convert('RGB')
+                    
+                    # Detect orientation
+                    angle = detect_orientation_from_image(page_img, image_path, page_idx)
+                    logging.info(f"Page {page_idx + 1}: detected rotation {angle}° for {image_path}")
+                    
+                    # Rotate image if needed
+                    if angle != 0:
+                        # PIL rotates counter-clockwise, but our angle is clockwise, so negate
+                        page_img = page_img.rotate(-angle, expand=True)
+                        logging.info(f"Rotated image by {angle}° for {image_path} page {page_idx+1}")
+                    
+                    # --- GROUP LOGIC WITH LOCK ---
+                    group_dir, lock_path = get_next_group_dir_with_lock(target_dir, MAX_FILES_PER_GROUP)
+                    group_name = os.path.basename(group_dir)
+                    group_clean = ''.join(c for c in group_name if c.isalnum())
+
+                    subfolder_clean = '_'.join(''.join(c for c in part if c.isalnum()) for part in subfolders) if subfolders else ''
+                    base_clean = ''.join(c for c in base if c.isalnum())
+                    customer_group = f"{customer_clean}_{group_clean}{FILENAME_SEPARATOR}"
+                    
+                    if total_pages > 1:
+                        # Multi-page file: include page number
+                        if subfolder_clean:
+                            name_parts = [subfolder_clean, f"{base_clean}page-{page_idx+1}.pdf"]
+                        else:
+                            name_parts = [f"{base_clean}page-{page_idx+1}.pdf"]
+                    else:
+                        # Single page: no page number
+                        if subfolder_clean:
+                            name_parts = [subfolder_clean, f"{base_clean}.pdf"]
+                        else:
+                            name_parts = [f"{base_clean}.pdf"]
+                    
+                    raw_out_fname = customer_group + '_'.join(name_parts)
+                    out_path = Path(group_dir) / raw_out_fname
+
+                    # Convert to PDF and save
+                    saved = False
+                    if not out_path.exists():
+                        page_img.save(str(out_path), "PDF", resolution=200.0)
+                        logging.info(f"Saved {'rotated' if angle else 'unrotated'} page {page_idx+1} to {out_path}")
+                        saved = True
+                    else:
+                        logging.warning(f"Page {page_idx+1} not saved, file already exists: {out_path}")
+
+                    # Release lock
+                    if os.path.exists(lock_path):
+                        os.remove(lock_path)
+
+                    if saved:
+                        logging.info(f"Saved {out_path}")
+
+                except Exception as e:
+                    msg = str(e)
+                    if 'Permission denied' in msg or 'Timeout' in msg or 'lock' in msg:
+                        logging.info(f"Transient error processing page {page_idx+1} of {image_path}: {e}")
+                    else:
+                        logging.error(f"Error processing page {page_idx+1} of {image_path}: {e}", exc_info=True)
+                        log_error(image_path, f"Page {page_idx+1} error: {e}")
+                    
+                    # Try to save unrotated version on error
+                    try:
+                        if is_multipage:
+                            img.seek(page_idx)
+                        page_img = img.convert('RGB')
+                        
+                        group_dir, lock_path = get_next_group_dir_with_lock(target_dir, MAX_FILES_PER_GROUP)
+                        group_name = os.path.basename(group_dir)
+                        group_clean = ''.join(c for c in group_name if c.isalnum())
+                        subfolder_clean = '_'.join(''.join(c for c in part if c.isalnum()) for part in subfolders) if subfolders else ''
+                        base_clean = ''.join(c for c in base if c.isalnum())
+                        customer_group = f"{customer_clean}_{group_clean}{FILENAME_SEPARATOR}"
+                        
+                        if total_pages > 1:
+                            if subfolder_clean:
+                                name_parts = [subfolder_clean, f"{base_clean}page-{page_idx+1}.pdf"]
+                            else:
+                                name_parts = [f"{base_clean}page-{page_idx+1}.pdf"]
+                        else:
+                            if subfolder_clean:
+                                name_parts = [subfolder_clean, f"{base_clean}.pdf"]
+                            else:
+                                name_parts = [f"{base_clean}.pdf"]
+                        
+                        raw_out_fname = customer_group + '_'.join(name_parts)
+                        out_path = Path(group_dir) / raw_out_fname
+                        
+                        if not out_path.exists():
+                            page_img.save(str(out_path), "PDF", resolution=200.0)
+                            logging.info(f"Saved (unrotated, error) {out_path}")
+                        else:
+                            logging.warning(f"(Unrotated, error) page {page_idx+1} not saved, file already exists: {out_path}")
+                        
+                        if os.path.exists(lock_path):
+                            os.remove(lock_path)
+                    except Exception as e2:
+                        logging.error(f"Failed to save unrotated page {page_idx+1} of {image_path} after error: {e2}")
+                    continue
+
+        append_processed_file(image_path)
+        logging.info(f"Finished {image_path} in {time.time() - start:.2f}s")
+        
+        # Remove source file after successful processing (configurable)
+        if REMOVE_SOURCE_FILE:
+            try:
+                os.remove(image_path)
+                logging.info(f"Removed source file: {image_path}")
+            except Exception as e:
+                logging.warning(f"Failed to remove source file {image_path}: {e}")
+
+    except Exception as e:
+        logging.error(f"Error on {image_path}: {e}")
+        log_error(image_path, str(e))
+
 def process_pdf(pdf_path: str):
     with processed_lock:
         if pdf_path in processed_files:
@@ -426,14 +623,36 @@ def process_pdf(pdf_path: str):
 job_queue = queue.Queue()
 executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
 
+def is_image_file(file_path: str) -> bool:
+    """Check if file is a supported image format"""
+    return file_path.lower().endswith(IMAGE_EXTENSIONS)
+
+def is_pdf_file(file_path: str) -> bool:
+    """Check if file is a PDF"""
+    return file_path.lower().endswith(PDF_EXTENSIONS)
+
+def is_supported_file(file_path: str) -> bool:
+    """Check if file is any supported format"""
+    return file_path.lower().endswith(PROCESS_EXTENSIONS)
+
 def queue_worker():
     while True:
-        pdf_path = job_queue.get()
+        file_path = job_queue.get()
         job_queue.task_done()
-        if pdf_path is None:
+        if file_path is None:
             break
         increment_total()
-        future = executor.submit(process_pdf, pdf_path)
+        
+        # Route to appropriate processor based on file type
+        if is_pdf_file(file_path):
+            future = executor.submit(process_pdf, file_path)
+        elif is_image_file(file_path):
+            future = executor.submit(process_image, file_path)
+        else:
+            # File not in supported extensions, skip silently
+            logging.debug(f"Skipping unsupported file type: {file_path}")
+            continue
+            
         future.add_done_callback(update_progress)
 
 # Start single queue thread
@@ -441,38 +660,48 @@ t_queue = threading.Thread(target=queue_worker, daemon=True)
 t_queue.start()
 
 # Watchdog handler
-class PDFHandler(FileSystemEventHandler):
+class FileHandler(FileSystemEventHandler):
     def on_created(self, event):
-        if event.is_directory or not event.src_path.lower().endswith('.pdf'):
+        if event.is_directory:
             return
+        
+        file_path = event.src_path
+        if not is_supported_file(file_path):
+            return
+            
         def enqueue_if_needed():
             try:
-                wait_until_file_is_ready(event.src_path)
+                wait_until_file_is_ready(file_path)
                 with processed_lock:
-                    if event.src_path in processed_files:
+                    if file_path in processed_files:
                         return
-                job_queue.put(event.src_path)
-                logging.info(f"Enqueued {event.src_path}")
+                job_queue.put(file_path)
+                file_type = "PDF" if is_pdf_file(file_path) else "image"
+                logging.info(f"Enqueued {file_type}: {file_path}")
             except Exception as e:
-                log_error(event.src_path, str(e))
+                log_error(file_path, str(e))
         threading.Thread(target=enqueue_if_needed, daemon=True).start()
 
-def scan_existing_pdfs(root: str):
-    pdfs_to_enqueue = []
+def scan_existing_files(root: str):
+    """Scan for existing supported files to process"""
+    files_to_enqueue = []
     for dirpath, _, files in os.walk(root):
         for fname in files:
-            if fname.lower().endswith('.pdf'):
-                full = os.path.join(dirpath, fname)
+            full_path = os.path.join(dirpath, fname)
+            if is_supported_file(full_path):
                 with processed_lock:
-                    if full in processed_files:
+                    if full_path in processed_files:
                         continue
-                pdfs_to_enqueue.append(full)
-    def enqueue_file(f):
-        job_queue.put(f)
-        logging.info(f"Enqueued existing {f}")
+                files_to_enqueue.append(full_path)
+    
+    def enqueue_file(file_path):
+        job_queue.put(file_path)
+        file_type = "PDF" if is_pdf_file(file_path) else "image"
+        logging.info(f"Enqueued existing {file_type}: {file_path}")
+    
     # Parallelize enqueueing
     pool = ThreadPoolExecutor(max_workers=8)
-    for f in pdfs_to_enqueue:
+    for f in files_to_enqueue:
         pool.submit(enqueue_file, f)
     pool.shutdown(wait=True)
 
@@ -486,12 +715,19 @@ if __name__ == "__main__":
 
     initialize_customer_groups()
 
-    observer = Observer()
-    observer.schedule(PDFHandler(), Path(WATCH_FOLDER), recursive=True)
-    observer.start()
-    logging.info(f"Watching {WATCH_FOLDER}")
+    # Log the configured extensions
+    logging.info(f"Configured to process extensions: {', '.join(PROCESS_EXTENSIONS)}")
+    if PDF_EXTENSIONS:
+        logging.info(f"PDF extensions: {', '.join(PDF_EXTENSIONS)}")
+    if IMAGE_EXTENSIONS:
+        logging.info(f"Image extensions: {', '.join(IMAGE_EXTENSIONS)}")
 
-    scan_existing_pdfs(WATCH_FOLDER)
+    observer = Observer()
+    observer.schedule(FileHandler(), Path(WATCH_FOLDER), recursive=True)
+    observer.start()
+    logging.info(f"Watching {WATCH_FOLDER} for supported file types")
+
+    scan_existing_files(WATCH_FOLDER)
 
     try:
         while True:
