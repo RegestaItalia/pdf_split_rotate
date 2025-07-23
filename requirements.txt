@@ -4,3 +4,6 @@ pdf2image
 pytesseract
 Pillow
 python-dotenv
+PyPDF2
+tabulate
+tqdm
