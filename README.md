@@ -1,119 +1,63 @@
-# PDF Split, Rotate & Clean
+
+# PDF Split & Utilities
 
 ## Overview
-This project provides robust Python scripts for batch processing, cleaning, and analyzing PDF files in directory trees. The main script (`pdf_split_rotate.py`) automatically splits PDFs into single-page files, detects and corrects page orientation using OCR, and saves the results with standardized filenames. Additional utilities are included for renaming files/folders, counting PDF pages, and generating sample PDFs for testing.
+This repository provides a suite of Python scripts for batch processing, cleaning, and analyzing PDF files and related directory structures. The tools are designed for robust, automated workflows in document management and archiving.
 
 ---
 
-## Features
-- **Recursive directory watching**: Monitors a folder (and subfolders) for new or changed PDF files.
-- **Batch processing**: Processes all existing PDFs in the watch folder on startup.
-- **Page splitting**: Each PDF is split into single-page PDFs.
-- **Automatic rotation**: Uses Tesseract OCR to detect and correct page orientation.
-- **Filename and folder cleaning**: Standardizes output filenames and folder names for consistency using customizable rules.
-- **Collision resolution**: Automatically renames files to avoid overwriting.
-- **Parallel processing**: Utilizes multiple CPU cores for fast operation.
-- **Progress tracking**: Keeps a log of processed files to avoid duplicates.
-- **Error and warning logs**: All issues are logged for review.
-- **PDF page counting**: Utility to count pages in PDFs and compare folder structures.
-- **Sample PDF generator**: Utility to create randomized, rotated, and merged sample PDFs for testing.
+## Python Scripts
 
----
+### 1. `pdf_split_rotate.py` — Main PDF Processor
 
-## Requirements
-- **Python 3.7+**
-- **Poppler** (for `pdf2image`):
-  - Windows: Download from [Poppler for Windows](http://blog.alivate.com.au/poppler-windows/)
-  - Linux: `sudo apt install poppler-utils`
-- **Tesseract OCR**:
-  - Windows: [UB Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki)
-  - Linux: `sudo apt install tesseract-ocr`
-- **Ghostscript** (optional, for some PDF conversions)
-- Python packages (see `requirements.txt`):
-  - watchdog
-  - PyMuPDF
-  - pdf2image
-  - pytesseract
-  - Pillow
-  - python-dotenv
-  - tabulate (for `pdf_pages_count.py`)
-  - PyPDF2 (for `pdf_pages_count.py` and `pdf_sample_generator.py`)
+Watches a folder for new PDF/image files, splits PDFs into single pages, auto-rotates pages using OCR, and saves results with standardized names. Supports parallel processing, error logging, and processed-file tracking.
 
----
+**Key Features:**
+- Recursive directory watching and batch processing
+- Splits PDFs and multi-page images into single-page PDFs
+- Detects and corrects page orientation (Tesseract OCR)
+- Cleans and standardizes output filenames/folders
+- Parallel processing with progress tracking
+- Robust error and warning logging
 
-## Installation
-1. Install system dependencies (Poppler, Tesseract, Ghostscript if needed).
-2. Install Python packages:
-   ```powershell
-   pip install -r requirements.txt
-   pip install tabulate PyPDF2  # For page counting and sample generation
-   ```
-3. (Optional) Copy `.env.template` to `.env` and adjust settings as needed.
-
----
-
-## Usage
-
-### 1. Main PDF Processor: `pdf_split_rotate.py`
-- **Purpose:** Watches a folder for new PDFs, splits each into single-page files, auto-rotates, and cleans names.
-- **Configuration:**
-  - Edit `.env` or set environment variables:
-    - `WATCH_FOLDER`, `OUTPUT_FOLDER`, `PROCESSED_FILE_PATH`, `ERROR_LOG_PATH`, `WARNINGS_LOG_PATH`, `MAX_WORKERS`, `RETRIES`, `RETRY_DELAY`, `FILENAME_SEPARATOR`, `RESET_PROGRESS`
-- **Run:**
-  ```powershell
-  python pdf_split_rotate.py
-  ```
-- **What it does:**
-  - Processes all PDFs in the watch folder and subfolders.
-  - Splits each PDF into single-page PDFs.
-  - Detects and corrects page orientation using Tesseract OCR.
-  - Cleans and standardizes output filenames and folder names.
-  - Logs processed files, errors, and warnings.
-
-#### Example: Cleaning a Folder Name
+**Sphinx-style Example:**
 ```python
 from pdf_files_rename import clean_name
 cleaned = clean_name('Documenti 3Z Srl', '/output', kind='dir')
-print(cleaned)  # Output: '3z_srl'
+print(cleaned)  # '3zsrl'
+```
+
+**Run:**
+```bash
+python pdf_split_rotate.py
 ```
 
 ---
 
-### 2. Filename/Folder Cleaner: `pdf_files_rename.py`
-- **Purpose:** Recursively cleans file and folder names using a customizable set of rules.
-- **Key Functions:**
-  - `clean_name(name, parent, kind)`: Applies rules to clean a file or directory name.
-  - `resolve_collision(dest)`: Ensures no filename collisions by appending a suffix if needed.
+### 2. `pdf_files_rename.py` — Filename/Folder Cleaner
 
-#### Example: Cleaning a File Name
-```python
-from pdf_files_rename import clean_name
-cleaned = clean_name('Documenti - Fattura 2023.pdf', '/output', kind='file')
-print(cleaned)  # Output: 'fattura_2023.pdf'
-```
+Recursively cleans file and folder names using customizable rules. Ensures names are safe, consistent, and collision-free.
 
-#### Example: Resolving Filename Collisions
+**Main Functions:**
+
+.. autofunction:: clean_name
+
+.. autofunction:: resolve_collision
+
+**Example:**
 ```python
-from pathlib import Path
-from pdf_files_rename import resolve_collision
+from pdf_files_rename import clean_name, resolve_collision
+name = clean_name('Documenti - Fattura 2023.pdf', '/output', kind='file')
 unique_path = resolve_collision(Path('/output/fattura_2023.pdf'))
-print(unique_path)
 ```
 
 ---
 
-### 3. PDF Page Counter: `pdf_pages_count.py`
-- **Purpose:** Recursively counts all pages in every PDF under a folder, compares two folder trees, and logs results.
-- **Run:**
-  ```powershell
-  python pdf_pages_count.py
-  ```
-- **What it does:**
-  - Compares two root folders (edit `root1` and `root2` in the script).
-  - Logs a table of which customer folders are present in each root.
-  - Logs page counts for each customer in both roots.
+### 3. `pdf_pages_count.py` — PDF Page Counter & Folder Comparator
 
-#### Example: Count Pages in a Folder
+Recursively counts all pages in every PDF under a folder, compares two folder trees, and logs results. Useful for verifying batch splits and folder consistency.
+
+**Sphinx-style Example:**
 ```python
 from pdf_pages_count import count_pdf_pages
 pages = count_pdf_pages('D:/01_unzipped')
@@ -122,19 +66,11 @@ print(f"Total pages: {pages}")
 
 ---
 
-### 4. Sample PDF Generator: `pdf_sample_generator.py`
-- **Purpose:** Merges and randomly rotates pages from multiple PDFs to create a sample PDF for testing.
-- **Run:**
-  ```powershell
-  python pdf_sample_generator.py
-  ```
-- **What it does:**
-  - Selects random PDFs from a folder.
-  - Merges and shuffles their pages.
-  - Randomly rotates some pages.
-  - Outputs a single sample PDF.
+### 4. `pdf_sample_generator.py` — Sample PDF Generator
 
-#### Example: Generate a Sample PDF
+Merges and randomly rotates pages from multiple PDFs to create a sample PDF for testing or demonstration.
+
+**Sphinx-style Example:**
 ```python
 from pdf_sample_generator import merge_and_rotate_pdfs, get_all_pdf_paths
 pdfs = get_all_pdf_paths('samples/libra')
@@ -145,15 +81,55 @@ with open('samples/test_pdf.pdf', 'wb') as f:
 
 ---
 
-## Output
-- Each page of every PDF is saved as a separate, correctly rotated PDF in the output folder.
-- Filenames and folder names are cleaned for consistency.
-- Logs are written for errors, warnings, and processed files.
+### 5. `pdf_group_rename.py` — Group Folder Renamer
+
+Renames folders like `group_1`, `group_2`, ... to `group1`, `group2`, ... recursively. Preview changes before applying.
 
 ---
 
+### 6. `list_non_pdf_files.py` — List Non-PDF Files
+
+Lists all non-PDF files in a directory tree. Useful for data hygiene and migration checks.
+
+---
+
+### 7. `pdf_pages_count_check.py` — PDF Page Count Checker
+
+Checks and logs the number of pages in PDFs, with tabular output and logging.
+
+---
+
+## Requirements
+
+- Python 3.7+
+- Poppler (for `pdf2image`)
+- Tesseract OCR
+- Ghostscript (optional)
+- See `requirements.txt` for Python packages
+
+## Installation
+
+1. Install system dependencies (Poppler, Tesseract, Ghostscript if needed)
+2. Install Python packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. (Optional) Copy `.env.template` to `.env` and adjust settings
+
+## Usage Notes
+
+- Configure environment variables in `.env` or via the shell for advanced options (see code comments)
+- All logs and outputs are written to the `logs/` and `output/` folders
+
 ## Troubleshooting
-- Ensure Poppler and Tesseract are installed and available in your system PATH.
-- Check the log files for details on any errors or warnings.
-- For large batches, increase `MAX_WORKERS` for faster processing (CPU dependent).
+
+- Ensure Poppler and Tesseract are installed and in your system PATH
+- Check log files for error details
+- For large batches, increase `MAX_WORKERS` (CPU dependent)
+
+---
+
+## License
+See LICENSE file.
+  - Outputs a single sample PDF.
 
