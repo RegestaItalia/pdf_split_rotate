@@ -7,15 +7,17 @@ This folder contains robust PowerShell scripts for automated folder cleanup and 
 ## FolderCleanupService.ps1
 
 ### Overview
-A configurable PowerShell script for automated folder cleanup. Supports both full and timestamp-based cleanup modes, with global and local safelists, logging, and Windows service integration.
+A configurable PowerShell script for automated folder cleanup using Windows Task Scheduler. Supports both full and timestamp-based cleanup modes, with global and local safelists, comprehensive logging, and reliable automation.
 
 ### Features
-- **Full cleanup**: Remove all files/folders except those in safelists.
-- **Timestamp-based cleanup**: Remove only files/folders older than a threshold, based on timestamps in filenames.
-- **Global and local safelists**: Protect important files/folders from deletion.
-- **Configurable schedule**: Can run as a Windows service at regular intervals.
-- **Comprehensive logging**: Logs actions, warnings, and errors to file and Windows Event Log.
-- **Dry run and test modes**: Preview what would be deleted before running for real.
+- **Timestamp-based cleanup**: Remove only files/folders older than a threshold, based on timestamps extracted from filenames (e.g., `ekr.pim-20250718T074751.380.log`)
+- **Full cleanup**: Remove all files/folders except those in safelists
+- **Folder size protection**: Skip cleanup if folder is below configurable size threshold
+- **Global and local safelists**: Protect important files/folders from deletion
+- **Task Scheduler integration**: Reliable automation via Windows Task Scheduler (runs as SYSTEM)
+- **Comprehensive logging**: Logs actions, warnings, and errors to file and Windows Event Log
+- **Dry run and test modes**: Preview what would be deleted before running for real
+- **Configurable patterns**: Support multiple timestamp formats in filenames
 
 ### Usage
 1. **Configure the script**
@@ -35,34 +37,89 @@ A configurable PowerShell script for automated folder cleanup. Supports both ful
      ```powershell
      .\FolderCleanupService.ps1 -TestRun
      ```
-5. **Install as a Windows service**
+5. **Install as a Scheduled Task**
    - Run:
      ```powershell
-     .\FolderCleanupService.ps1 -Install
-     Start-Service FolderCleanupService
+     .\FolderCleanupService.ps1 -InstallTask
      ```
-6. **Uninstall the service**
+6. **Uninstall the Scheduled Task**
    - Run:
      ```powershell
-     .\FolderCleanupService.ps1 -Uninstall
+     .\FolderCleanupService.ps1 -UninstallTask
      ```
+
+### Management Commands
+After installation, manage the task with:
+```powershell
+# Check task status
+Get-ScheduledTask -TaskName "FolderCleanupTask"
+
+# Run task immediately
+Start-ScheduledTask -TaskName "FolderCleanupTask"
+
+# View task execution history
+Get-ScheduledTaskInfo -TaskName "FolderCleanupTask"
+
+# Stop running task
+Stop-ScheduledTask -TaskName "FolderCleanupTask"
+```
 
 ### Parameters
-- `-Install` : Install as a Windows service
-- `-Uninstall` : Uninstall the service
-- `-RunAsService` : (internal) Run in service mode
+- `-InstallTask` : Install as a Windows Scheduled Task
+- `-UninstallTask` : Uninstall the Scheduled Task
+- `-RunCleanup` : (internal) Run cleanup process (used by scheduled task)
 - `-TestRun` : Run cleanup once (deletes files!)
-- `-TestConfig` : Test configuration and patterns
+- `-TestConfig` : Test configuration and timestamp patterns
 - `-DryRun` : Preview what would be deleted
 
+### Configuration Options
+The script includes comprehensive configuration options:
+- **Task Schedule**: Configurable interval (default: 20 minutes)
+- **Timestamp Patterns**: Support for multiple date/time formats in filenames
+- **Folder Size Threshold**: Skip cleanup if folder is below specified size (MB)
+- **Age Thresholds**: Different age limits per folder
+- **Safelists**: Global and per-folder protection lists
+
+### Supported Timestamp Formats
+The script can extract timestamps from filenames with patterns like:
+- `ekr.pim-20250718T074751.380.log` (ISO format with T separator)
+- `backup_20250723-143000_final.txt` (date-time with dash)
+- `log_2025-07-23_system.log` (date only)
+- Custom patterns can be added in the configuration
+
+### Example Configuration
+The script includes a working example for EKRO log cleanup:
+```powershell
+$FoldersToClean = @(
+    @{
+        Path = "C:\Users\RegestaAdm\Documents\pdf_split_rotate-main\scripts\folder_cleanup\test_folders\timestamp_cleanup_test"
+        Mode = "TimestampBased"
+        AgeThresholdDays = 1/72  # 20 minutes for testing
+        LocalSafelist = @("ekr.pim.log", "monitors")
+    }
+)
+```
+
+This configuration:
+- Runs every 20 minutes
+- Deletes files older than 20 minutes (for testing)
+- Protects `ekr.pim.log` and `monitors` files/folders
+- Only processes folders larger than 1 MB
+
 ### Logging
-- Log files: `C:\Windows\Logs\FolderCleanupService` (configurable)
-- Windows Event Log: Source = `FolderCleanupService`
+- Log files: `C:\Windows\Logs\FolderCleanupTask` (configurable)
+- Windows Event Log: Source = `FolderCleanupTask`
+- Automatic log rotation when files exceed size limit
+- Daily log files with timestamp format: `FolderCleanup_YYYYMMDD.log`
 
 ### Troubleshooting
-- Run PowerShell as Administrator for service install/uninstall.
-- Check log files and Windows Event Log for errors.
-- Adjust safelists and patterns as needed for your environment.
+- Run PowerShell as Administrator for task install/uninstall
+- Check log files and Windows Event Log for detailed error information
+- Use `-TestConfig` to validate timestamp patterns and folder paths
+- Use `-DryRun` to preview cleanup actions before running
+- Verify folder paths exist and are accessible
+- Check that timestamp patterns match your filename formats
+- Adjust folder size thresholds if cleanup is being skipped unexpectedly
 
 ---
 
@@ -123,5 +180,6 @@ A PowerShell utility to generate test files and folders for validating the Folde
 ---
 
 ## Author
-- RegestaItalia
+- Giovanni Misso / RegestaItalia
 - Last updated: July 2025
+- Version: 1.0 (Task Scheduler implementation)

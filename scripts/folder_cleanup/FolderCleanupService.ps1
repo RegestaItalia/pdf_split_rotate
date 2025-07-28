@@ -2,38 +2,73 @@
 
 <#
 .SYNOPSIS
-    Folder Cleanup Service - Configurable folder cleaning with timestamp-based and full cleanup modes
+    Folder Cleanup Task - Configurable folder cleaning with timestamp-based and full cleanup modes
 .DESCRIPTION
-    This script can be deployed as a Windows service to automatically clean folders based on configuration.
+    This script can be deployed as a Windows Scheduled Task to automatically clean folders based on configuration.
     Supports two modes: full cleanup and timestamp-based cleanup with safelist protection.
+    
+    Features:
+    - Timestamp-based cleanup with configurable patterns (e.g., ekr.pim-20250718T074751.380.log)
+    - Folder size threshold protection
+    - Global and local safelists
+    - Reliable Task Scheduler automation (runs as SYSTEM)
+    - Comprehensive logging to files and Windows Event Log
+    - Dry run and test modes for safe validation
+    
+.PARAMETER InstallTask
+    Install the script as a Windows Scheduled Task
+.PARAMETER UninstallTask
+    Uninstall the Windows Scheduled Task
+.PARAMETER RunCleanup
+    Run the cleanup process once (used internally by scheduled task)
+.PARAMETER TestRun
+    Run cleanup once for testing (WARNING: Will delete files!)
+.PARAMETER TestConfig
+    Test configuration and timestamp patterns without making changes
+.PARAMETER DryRun
+    Preview what would be deleted without actually deleting anything
+    
+.EXAMPLE
+    .\FolderCleanupService.ps1 -InstallTask
+    Installs the cleanup task to run every 20 minutes
+    
+.EXAMPLE
+    .\FolderCleanupService.ps1 -TestConfig
+    Tests the configuration and shows which timestamp patterns work
+    
+.EXAMPLE
+    .\FolderCleanupService.ps1 -DryRun
+    Shows what files would be deleted without actually deleting them
+    
 .NOTES
     Author: Giovanni Misso
-    Date: 2025-07-23
-    Version: 1.0
+    Date: 2025-07-28
+    Version: 1.1
+    Requires: PowerShell 5.1+, Administrator privileges for task installation
 #>
 
 param(
-    [switch]$Install,
-    [switch]$Uninstall,
-    [switch]$RunAsService,
+    [switch]$InstallTask,
+    [switch]$UninstallTask,
+    [switch]$RunCleanup,
     [switch]$TestRun,
     [switch]$TestConfig,
     [switch]$DryRun
 )
 
 # ==================== CONFIGURATION SECTION ====================
-# Modify these variables to configure the service behavior
+# Modify these variables to configure the task behavior
 
-# Service Configuration
-$ServiceName = "FolderCleanupService"
-$ServiceDisplayName = "Folder Cleanup Service"
-$ServiceDescription = "Automated folder cleanup with configurable rules and safelist protection"
+# Task Configuration
+$TaskName = "FolderCleanupTask"
+$TaskDisplayName = "Folder Cleanup Task"
+$TaskDescription = "Automated folder cleanup with configurable rules and safelist protection"
 
 # Cleanup Schedule (in minutes) - Default: 1440 minutes = 24 hours (daily)
-$CleanupIntervalMinutes = 1
+$CleanupIntervalMinutes = 20
 
 # Log Configuration
-$LogPath = "C:\Windows\Logs\FolderCleanupService"
+$LogPath = "C:\Windows\Logs\FolderCleanupTask"
 $MaxLogSizeMB = 50
 $MaxLogFiles = 10
 
@@ -41,31 +76,35 @@ $MaxLogFiles = 10
 # Define multiple timestamp patterns that might appear in filenames
 # Format: @{Pattern="regex_pattern"; Format="datetime_format"}
 $TimestampPatterns = @(
-    @{Pattern="_(\d{8})_"; Format="yyyyMMdd"},           # _20250723_
-    @{Pattern="_(\d{8}-\d{6})_"; Format="yyyyMMdd-HHmmss"}, # _20250723-143000_
-    @{Pattern="_(\d{4}-\d{2}-\d{2})_"; Format="yyyy-MM-dd"}, # _2025-07-23_
-    @{Pattern="_(\d{14})_"; Format="yyyyMMddHHmmss"},    # _20250723143000_
-    @{Pattern="_(\d{4}\d{2}\d{2}_\d{6})_"; Format="yyyyMMdd_HHmmss"} # _20250723_143000_
+    @{Pattern="-(\d{8}T\d{6})"; Format="yyyyMMddTHHmmss"}  # ekr.pim-20250718T074751.380.log
+    # @{Pattern="_(\d{8}-\d{6})_"; Format="yyyyMMdd-HHmmss"}, # _20250723-143000_
+    # @{Pattern="_(\d{4}-\d{2}-\d{2})_"; Format="yyyy-MM-dd"}, # _2025-07-23_
+    # @{Pattern="_(\d{14})_"; Format="yyyyMMddHHmmss"},    # _20250723143000_
+    # @{Pattern="_(\d{4}\d{2}\d{2}_\d{6})_"; Format="yyyyMMdd_HHmmss"} # _20250723_143000_
 )
 
 # Default age threshold for timestamp-based cleanup (in days)
 $DefaultAgeThresholdDays = 30
 
+# Minimum folder size threshold (in MB) - Skip cleanup if folder is smaller than this
+# Set to 0 to disable size checking
+$MinimumFolderSizeMB = 1 #10*1024
+
 # Folder Configuration
 # Each folder can have: Path, Mode, AgeThresholdDays, LocalSafelist
 $FoldersToClean = @(
     @{
-        Path = "C:\Users\giovanni.misso\Documents\pdf_split_rotate\scripts\folder_cleanup\test_folders\timestamp_cleanup_test"
+        Path = "C:\Users\RegestaAdm\Documents\pdf_split_rotate-main\scripts\folder_cleanup\test_folders\timestamp_cleanup_test"
         Mode = "TimestampBased"  # Options: "Full" or "TimestampBased"
-        AgeThresholdDays = 30
-        LocalSafelist = @("important.txt", "keep_this_folder")
-    },
-    @{
-        Path = "C:\Users\giovanni.misso\Documents\pdf_split_rotate\scripts\folder_cleanup\test_folders\full_cleanup_test" 
-        Mode = "Full"
-        AgeThresholdDays = 0  # Not used for Full mode
-        LocalSafelist = @("config.ini")
+        AgeThresholdDays = 1/72 # 1/72 is 20 min
+        LocalSafelist = @("ekr.pim.log", "monitors")
     }
+    # @{
+    #     Path = "C:\Users\RegestaAdm\Documents\pdf_split_rotate-main\scripts\folder_cleanup\test_folders\full_cleanup_test" 
+    #     Mode = "Full"
+    #     AgeThresholdDays = 0  # Not used for Full mode
+    #     LocalSafelist = @("config.ini")
+    # }
     # Add more folders as needed
     # @{
     #     Path = "C:\Another\Folder"
@@ -77,22 +116,16 @@ $FoldersToClean = @(
 
 # Global Safelist - These files/folders will NEVER be deleted from ANY folder
 $GlobalSafelist = @(
-    "desktop.ini",
-    "thumbs.db",
-    ".gitkeep",
-    "README.md",
-    "readme.txt",
-    "important",
-    "backup"
+    "ekr.pim.log",
+    "monitors"
 )
 
 # ==================== END CONFIGURATION SECTION ====================
 
 # Global variables
 $LogFile = ""
-$ServiceRunning = $false
 
-function Write-ServiceLog {
+function Write-TaskLog {
     param(
         [string]$Message,
         [string]$Level = "INFO"
@@ -115,14 +148,17 @@ function Write-ServiceLog {
         # Write to log file
         Add-Content -Path $LogFile -Value $logEntry -Encoding UTF8
         
-        # Also write to event log if running as service
-        if ($ServiceRunning) {
+        # Also write to event log
+        try {
             $eventType = switch ($Level) {
                 "ERROR" { "Error" }
                 "WARN" { "Warning" }
                 default { "Information" }
             }
-            Write-EventLog -LogName Application -Source $ServiceName -EntryType $eventType -EventId 1001 -Message $Message
+            Write-EventLog -LogName Application -Source $TaskName -EntryType $eventType -EventId 1001 -Message $Message -ErrorAction SilentlyContinue
+        }
+        catch {
+            # Event log writing is optional - don't fail if it doesn't work
         }
         
         # Rotate log if too large
@@ -143,12 +179,12 @@ function Rotate-LogFiles {
             $filesToDelete = $logFiles | Select-Object -Skip ($MaxLogFiles - 1)
             foreach ($file in $filesToDelete) {
                 Remove-Item $file.FullName -Force
-                Write-ServiceLog "Rotated old log file: $($file.Name)"
+                Write-TaskLog "Rotated old log file: $($file.Name)"
             }
         }
     }
     catch {
-        Write-ServiceLog "Failed to rotate log files: $($_.Exception.Message)" "ERROR"
+        Write-TaskLog "Failed to rotate log files: $($_.Exception.Message)" "ERROR"
     }
 }
 
@@ -177,6 +213,30 @@ function Test-SafelistProtection {
     return $false
 }
 
+function Get-FolderSizeMB {
+    param([string]$FolderPath)
+    
+    try {
+        if (-not (Test-Path $FolderPath)) {
+            return 0
+        }
+        
+        $folderSize = Get-ChildItem -Path $FolderPath -Recurse -Force -ErrorAction SilentlyContinue | 
+                     Measure-Object -Property Length -Sum | 
+                     Select-Object -ExpandProperty Sum
+        
+        if ($null -eq $folderSize) {
+            return 0
+        }
+        
+        return [math]::Round($folderSize / 1MB, 2)
+    }
+    catch {
+        Write-TaskLog "Error calculating folder size for $FolderPath`: $($_.Exception.Message)" "WARN"
+        return 0
+    }
+}
+
 function Get-TimestampFromFilename {
     param([string]$FileName)
     
@@ -202,13 +262,13 @@ function Clean-FolderFull {
         [array]$LocalSafelist
     )
     
-    Write-ServiceLog "Starting full cleanup of folder: $FolderPath"
+    Write-TaskLog "Starting full cleanup of folder: $FolderPath"
     $deletedCount = 0
     $skippedCount = 0
     
     try {
         if (-not (Test-Path $FolderPath)) {
-            Write-ServiceLog "Folder does not exist: $FolderPath" "WARN"
+            Write-TaskLog "Folder does not exist: $FolderPath" "WARN"
             return
         }
         
@@ -216,7 +276,7 @@ function Clean-FolderFull {
         
         foreach ($item in $items) {
             if (Test-SafelistProtection -ItemPath $item.FullName -LocalSafelist $LocalSafelist) {
-                Write-ServiceLog "Skipped safelist item: $($item.Name)"
+                Write-TaskLog "Skipped safelist item: $($item.Name)"
                 $skippedCount++
                 continue
             }
@@ -224,22 +284,22 @@ function Clean-FolderFull {
             try {
                 if ($item.PSIsContainer) {
                     Remove-Item -Path $item.FullName -Recurse -Force
-                    Write-ServiceLog "Deleted folder: $($item.Name)"
+                    Write-TaskLog "Deleted folder: $($item.Name)"
                 } else {
                     Remove-Item -Path $item.FullName -Force
-                    Write-ServiceLog "Deleted file: $($item.Name)"
+                    Write-TaskLog "Deleted file: $($item.Name)"
                 }
                 $deletedCount++
             }
             catch {
-                Write-ServiceLog "Failed to delete $($item.Name): $($_.Exception.Message)" "ERROR"
+                Write-TaskLog "Failed to delete $($item.Name): $($_.Exception.Message)" "ERROR"
             }
         }
         
-        Write-ServiceLog "Full cleanup completed. Deleted: $deletedCount, Skipped: $skippedCount"
+        Write-TaskLog "Full cleanup completed. Deleted: $deletedCount, Skipped: $skippedCount"
     }
     catch {
-        Write-ServiceLog "Error during full cleanup of $FolderPath`: $($_.Exception.Message)" "ERROR"
+        Write-TaskLog "Error during full cleanup of $FolderPath`: $($_.Exception.Message)" "ERROR"
     }
 }
 
@@ -250,14 +310,14 @@ function Clean-FolderTimestampBased {
         [array]$LocalSafelist
     )
     
-    Write-ServiceLog "Starting timestamp-based cleanup of folder: $FolderPath (Age threshold: $AgeThresholdDays days)"
+    Write-TaskLog "Starting timestamp-based cleanup of folder: $FolderPath (Age threshold: $AgeThresholdDays days)"
     $deletedCount = 0
     $skippedCount = 0
     $noTimestampCount = 0
     
     try {
         if (-not (Test-Path $FolderPath)) {
-            Write-ServiceLog "Folder does not exist: $FolderPath" "WARN"
+            Write-TaskLog "Folder does not exist: $FolderPath" "WARN"
             return
         }
         
@@ -266,7 +326,7 @@ function Clean-FolderTimestampBased {
         
         foreach ($item in $items) {
             if (Test-SafelistProtection -ItemPath $item.FullName -LocalSafelist $LocalSafelist) {
-                Write-ServiceLog "Skipped safelist item: $($item.Name)"
+                Write-TaskLog "Skipped safelist item: $($item.Name)"
                 $skippedCount++
                 continue
             }
@@ -274,7 +334,7 @@ function Clean-FolderTimestampBased {
             $timestamp = Get-TimestampFromFilename -FileName $item.Name
             
             if ($null -eq $timestamp) {
-                Write-ServiceLog "No timestamp found in filename: $($item.Name)"
+                Write-TaskLog "No timestamp found in filename: $($item.Name)"
                 $noTimestampCount++
                 continue
             }
@@ -283,38 +343,59 @@ function Clean-FolderTimestampBased {
                 try {
                     if ($item.PSIsContainer) {
                         Remove-Item -Path $item.FullName -Recurse -Force
-                        Write-ServiceLog "Deleted old folder: $($item.Name) (Date: $timestamp)"
+                        Write-TaskLog "Deleted old folder: $($item.Name) (Date: $timestamp)"
                     } else {
                         Remove-Item -Path $item.FullName -Force
-                        Write-ServiceLog "Deleted old file: $($item.Name) (Date: $timestamp)"
+                        Write-TaskLog "Deleted old file: $($item.Name) (Date: $timestamp)"
                     }
                     $deletedCount++
                 }
                 catch {
-                    Write-ServiceLog "Failed to delete $($item.Name): $($_.Exception.Message)" "ERROR"
+                    Write-TaskLog "Failed to delete $($item.Name): $($_.Exception.Message)" "ERROR"
                 }
             } else {
-                Write-ServiceLog "Kept recent item: $($item.Name) (Date: $timestamp)"
+                Write-TaskLog "Kept recent item: $($item.Name) (Date: $timestamp)"
                 $skippedCount++
             }
         }
         
-        Write-ServiceLog "Timestamp-based cleanup completed. Deleted: $deletedCount, Skipped: $skippedCount, No timestamp: $noTimestampCount"
+        Write-TaskLog "Timestamp-based cleanup completed. Deleted: $deletedCount, Skipped: $skippedCount, No timestamp: $noTimestampCount"
     }
     catch {
-        Write-ServiceLog "Error during timestamp-based cleanup of $FolderPath`: $($_.Exception.Message)" "ERROR"
+        Write-TaskLog "Error during timestamp-based cleanup of $FolderPath`: $($_.Exception.Message)" "ERROR"
     }
 }
 
 function Start-CleanupProcess {
-    Write-ServiceLog "=== Starting cleanup process ==="
+    Write-TaskLog "=== Starting cleanup process ==="
     $totalDeleted = 0
     $totalSkipped = 0
     $totalNoTimestamp = 0
     $totalErrors = 0
+    
     foreach ($folderConfig in $FoldersToClean) {
-        Write-ServiceLog "Processing folder: $($folderConfig.Path)"
+        Write-TaskLog "Processing folder: $($folderConfig.Path)"
+        
         try {
+            # Check if folder exists
+            if (-not (Test-Path $folderConfig.Path)) {
+                Write-TaskLog "Folder does not exist: $($folderConfig.Path)" "WARN"
+                $totalErrors++
+                continue
+            }
+            
+            # Check folder size if threshold is set
+            if ($MinimumFolderSizeMB -gt 0) {
+                $folderSizeMB = Get-FolderSizeMB -FolderPath $folderConfig.Path
+                Write-TaskLog "Folder size: $folderSizeMB MB (Threshold: $MinimumFolderSizeMB MB)"
+                
+                if ($folderSizeMB -lt $MinimumFolderSizeMB) {
+                    Write-TaskLog "Skipping cleanup - folder size ($folderSizeMB MB) is below threshold ($MinimumFolderSizeMB MB)"
+                    continue
+                }
+            }
+            
+            # Proceed with cleanup
             switch ($folderConfig.Mode) {
                 "Full" {
                     Clean-FolderFull -FolderPath $folderConfig.Path -LocalSafelist $folderConfig.LocalSafelist
@@ -324,77 +405,80 @@ function Start-CleanupProcess {
                     Clean-FolderTimestampBased -FolderPath $folderConfig.Path -AgeThresholdDays $ageThreshold -LocalSafelist $folderConfig.LocalSafelist
                 }
                 default {
-                    Write-ServiceLog "Unknown cleanup mode: $($folderConfig.Mode) for folder $($folderConfig.Path)" "ERROR"
+                    Write-TaskLog "Unknown cleanup mode: $($folderConfig.Mode) for folder $($folderConfig.Path)" "ERROR"
                     $totalErrors++
                 }
             }
         } catch {
-            Write-ServiceLog "Error processing folder $($folderConfig.Path): $($_.Exception.Message)" "ERROR"
+            Write-TaskLog "Error processing folder $($folderConfig.Path): $($_.Exception.Message)" "ERROR"
             $totalErrors++
         }
     }
-    Write-ServiceLog "=== Cleanup process completed ==="
-    # Optionally, print a summary here if you want to aggregate stats
+    Write-TaskLog "=== Cleanup process completed ==="
 }
 
-function Install-Service {
+function Install-ScheduledTask {
     try {
-        Write-Host "Installing $ServiceDisplayName..." -ForegroundColor Green
+        Write-Host "Installing Scheduled Task: $TaskDisplayName..." -ForegroundColor Green
         
         # Create event log source
-        if (-not ([System.Diagnostics.EventLog]::SourceExists($ServiceName))) {
-            New-EventLog -LogName Application -Source $ServiceName
+        try {
+            if (-not ([System.Diagnostics.EventLog]::SourceExists($TaskName))) {
+                New-EventLog -LogName Application -Source $TaskName
+            }
+        }
+        catch {
+            Write-Host "Note: Could not create event log source (this is optional)" -ForegroundColor Yellow
         }
         
-        $servicePath = $MyInvocation.MyCommand.Path
-        $arguments = "-ExecutionPolicy Bypass -File `"$servicePath`" -RunAsService"
+        $scriptPath = $PSCommandPath
+        if (-not $scriptPath) {
+            $scriptPath = $MyInvocation.MyCommand.Path
+        }
+        if (-not $scriptPath) {
+            throw "Could not determine script path for scheduled task"
+        }
         
-        New-Service -Name $ServiceName -BinaryPathName "powershell.exe $arguments" -DisplayName $ServiceDisplayName -Description $ServiceDescription -StartupType Automatic
+        # Create the action - Use a more explicit parameter format
+        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -RunCleanup"
         
-        Write-Host "Service installed successfully!" -ForegroundColor Green
-        Write-Host "Use 'Start-Service $ServiceName' to start the service." -ForegroundColor Yellow
+        # Create the trigger (runs every X minutes)
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $CleanupIntervalMinutes) -RepetitionDuration (New-TimeSpan -Days 365)
+        
+        # Create the principal (run as SYSTEM)
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        
+        # Create the settings
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -DontStopOnIdleEnd
+        
+        # Register the task
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $TaskDescription -Force
+        
+        Write-Host "Scheduled Task installed successfully!" -ForegroundColor Green
+        Write-Host "Task Name: $TaskName" -ForegroundColor Yellow
+        Write-Host "Runs every $CleanupIntervalMinutes minutes as SYSTEM user" -ForegroundColor Yellow
+        Write-Host "Use 'Get-ScheduledTask -TaskName `"$TaskName`"' to check status" -ForegroundColor Yellow
     }
     catch {
-        Write-Host "Failed to install service: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Failed to install scheduled task: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
-function Uninstall-Service {
+function Uninstall-ScheduledTask {
     try {
-        Write-Host "Uninstalling $ServiceDisplayName..." -ForegroundColor Yellow
+        Write-Host "Uninstalling Scheduled Task: $TaskDisplayName..." -ForegroundColor Yellow
         
-        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        
-        # Use sc.exe for compatibility with PowerShell 5.1
-        $result = & sc.exe delete $ServiceName
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Service uninstalled successfully!" -ForegroundColor Green
+        # Check if task exists
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+            Write-Host "Scheduled Task uninstalled successfully!" -ForegroundColor Green
         } else {
-            Write-Host "Failed to uninstall service: $result" -ForegroundColor Red
+            Write-Host "Scheduled Task '$TaskName' not found." -ForegroundColor Yellow
         }
     }
     catch {
-        Write-Host "Failed to uninstall service: $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-
-function Start-ServiceMode {
-    $script:ServiceRunning = $true
-    Write-ServiceLog "Service starting..."
-    
-    try {
-        while ($true) {
-            Start-CleanupProcess
-            
-            Write-ServiceLog "Next cleanup scheduled in $CleanupIntervalMinutes minutes"
-            Start-Sleep -Seconds ($CleanupIntervalMinutes * 60)
-        }
-    }
-    catch {
-        Write-ServiceLog "Service error: $($_.Exception.Message)" "ERROR"
-    }
-    finally {
-        Write-ServiceLog "Service stopping..."
+        Write-Host "Failed to uninstall scheduled task: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
@@ -430,10 +514,17 @@ function Test-Configuration {
         $exists = Test-Path $folderPath
         
         if ($exists) {
-            Write-Host "  [EXISTS] $folderPath (Mode: $folderMode)" -ForegroundColor Green
+            $folderSizeMB = Get-FolderSizeMB -FolderPath $folderPath
+            $sizeStatus = if ($MinimumFolderSizeMB -gt 0 -and $folderSizeMB -lt $MinimumFolderSizeMB) { " (BELOW THRESHOLD)" } else { "" }
+            Write-Host "  [EXISTS] $folderPath (Mode: $folderMode, Size: $folderSizeMB MB)$sizeStatus" -ForegroundColor $(if ($sizeStatus) { "Yellow" } else { "Green" })
         } else {
             Write-Host "  [NOT FOUND] $folderPath (Mode: $folderMode)" -ForegroundColor Red
         }
+    }
+    
+    if ($MinimumFolderSizeMB -gt 0) {
+        Write-Host ""
+        Write-Host "Minimum folder size threshold: $MinimumFolderSizeMB MB" -ForegroundColor Cyan
     }
     
     Write-Host ""
@@ -441,14 +532,17 @@ function Test-Configuration {
 }
 
 # Main script logic
-if ($Install) {
-    Install-Service
+if ($InstallTask) {
+    Install-ScheduledTask
 }
-elseif ($Uninstall) {
-    Uninstall-Service
+elseif ($UninstallTask) {
+    Uninstall-ScheduledTask
 }
-elseif ($RunAsService) {
-    Start-ServiceMode
+elseif ($RunCleanup) {
+    # Used by scheduled task - run cleanup once and exit
+    Write-TaskLog "Running scheduled cleanup task"
+    Start-CleanupProcess
+    Write-TaskLog "Scheduled cleanup task completed"
 }
 elseif ($TestRun) {
     Write-Host "Running test cleanup (files will be deleted!)..." -ForegroundColor Yellow
@@ -464,13 +558,29 @@ elseif ($DryRun) {
     $totalIgnored = 0
     $totalProtected = 0
     $totalErrors = 0
+    $totalSkippedSize = 0
+    
     foreach ($folderConfig in $FoldersToClean) {
         Write-Host "`nFolder: $($folderConfig.Path)" -ForegroundColor White
+        
         if (-not (Test-Path $folderConfig.Path)) {
             Write-Host "  [NOT FOUND]" -ForegroundColor Red
             $totalErrors++
             continue
         }
+        
+        # Check folder size
+        if ($MinimumFolderSizeMB -gt 0) {
+            $folderSizeMB = Get-FolderSizeMB -FolderPath $folderConfig.Path
+            Write-Host "  Folder size: $folderSizeMB MB (Threshold: $MinimumFolderSizeMB MB)" -ForegroundColor Cyan
+            
+            if ($folderSizeMB -lt $MinimumFolderSizeMB) {
+                Write-Host "  [SKIP] Folder size below threshold - no cleanup needed" -ForegroundColor Yellow
+                $totalSkippedSize++
+                continue
+            }
+        }
+        
         $items = Get-ChildItem -Path $folderConfig.Path -Force -ErrorAction SilentlyContinue
         foreach ($item in $items) {
             try {
@@ -511,29 +621,42 @@ elseif ($DryRun) {
     Write-Host "  To Keep: $totalToKeep" -ForegroundColor Green
     Write-Host "  Ignored (no timestamp): $totalIgnored" -ForegroundColor Yellow
     Write-Host "  Protected: $totalProtected" -ForegroundColor Blue
+    Write-Host "  Skipped (size threshold): $totalSkippedSize" -ForegroundColor Yellow
     Write-Host "  Errors: $totalErrors" -ForegroundColor Magenta
 }
 else {
     Write-Host @"
-Folder Cleanup Service Management Script
+Folder Cleanup Task Management Script
 
-Usage:
-  .\FolderCleanupService.ps1 -Install      Install the Windows service
-  .\FolderCleanupService.ps1 -Uninstall    Uninstall the Windows service  
-  .\FolderCleanupService.ps1 -TestConfig   Test the configuration without making changes
-  .\FolderCleanupService.ps1 -DryRun       Show what would be deleted without deleting
-  .\FolderCleanupService.ps1 -TestRun      Run cleanup once for testing (WARNING: Will delete files!)
+Installation & Management:
+  .\FolderCleanupService.ps1 -InstallTask    Install as Windows Scheduled Task
+  .\FolderCleanupService.ps1 -UninstallTask  Uninstall the Scheduled Task
 
-After installation:
-  Start-Service $ServiceName              Start the service
-  Stop-Service $ServiceName               Stop the service
-  Get-Service $ServiceName                Check service status
+Testing & Configuration:
+  .\FolderCleanupService.ps1 -TestConfig     Test the configuration without making changes
+  .\FolderCleanupService.ps1 -DryRun         Show what would be deleted without deleting
+  .\FolderCleanupService.ps1 -TestRun        Run cleanup once for testing (WARNING: Will delete files!)
+
+After installation, manage with:
+  Get-ScheduledTask -TaskName "$TaskName"                Check task status
+  Start-ScheduledTask -TaskName "$TaskName"              Run task immediately
+  Get-ScheduledTaskInfo -TaskName "$TaskName"            View task history
+  Stop-ScheduledTask -TaskName "$TaskName"               Stop running task
 
 Configuration:
   Edit the variables in the CONFIGURATION SECTION at the top of this script.
   
 Logs:
-  Service logs: $LogPath
-  Windows Event Log: Application -> Source: $ServiceName
+  Task logs: $LogPath
+  Windows Event Log: Application -> Source: $TaskName
+
+Features:
+  - Reliable PowerShell execution via Task Scheduler
+  - Runs as SYSTEM with full privileges
+  - Automatic retry and error handling
+  - Configurable timestamp-based cleanup
+  - Folder size threshold protection
+  - Comprehensive safelist protection
+  - Detailed logging and monitoring
 "@ -ForegroundColor White
 }
