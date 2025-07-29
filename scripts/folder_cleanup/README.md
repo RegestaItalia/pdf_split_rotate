@@ -11,11 +11,14 @@ A configurable PowerShell script for automated folder cleanup using Windows Task
 
 ### Features
 - **Timestamp-based cleanup**: Remove only files/folders older than a threshold, based on timestamps extracted from filenames (e.g., `ekr.pim-20250718T074751.380.log`)
+- **Time offset compensation**: Adjust for timezone differences in log file timestamps (e.g., logs 2 hours behind system time)
 - **Full cleanup**: Remove all files/folders except those in safelists
 - **Folder size protection**: Skip cleanup if folder is below configurable size threshold
+- **Emergency cleanup**: Force cleanup when disk space is critically low, bypassing folder size thresholds
 - **Global and local safelists**: Protect important files/folders from deletion
 - **Task Scheduler integration**: Reliable automation via Windows Task Scheduler (runs as SYSTEM)
 - **Comprehensive logging**: Logs actions, warnings, and errors to file and Windows Event Log
+- **Disk space monitoring**: Automatic monitoring of drive free space with emergency cleanup triggers
 - **Dry run and test modes**: Preview what would be deleted before running for real
 - **Configurable patterns**: Support multiple timestamp formats in filenames
 
@@ -49,19 +52,72 @@ A configurable PowerShell script for automated folder cleanup using Windows Task
      ```
 
 ### Management Commands
-After installation, manage the task with:
+After installation, manage the task with these PowerShell commands:
+
+**Basic Task Operations:**
 ```powershell
-# Check task status
+# Check if task exists and get basic info
 Get-ScheduledTask -TaskName "FolderCleanupTask"
 
-# Run task immediately
+# Start task immediately (runs once)
 Start-ScheduledTask -TaskName "FolderCleanupTask"
 
-# View task execution history
+# Stop currently running task
+Stop-ScheduledTask -TaskName "FolderCleanupTask"
+
+# Enable/Disable the scheduled task
+Enable-ScheduledTask -TaskName "FolderCleanupTask"
+Disable-ScheduledTask -TaskName "FolderCleanupTask"
+```
+
+**Task Status and History:**
+```powershell
+# Get detailed execution info (last run time, next run time, last result)
 Get-ScheduledTaskInfo -TaskName "FolderCleanupTask"
 
-# Stop running task
-Stop-ScheduledTask -TaskName "FolderCleanupTask"
+# View full task configuration
+Get-ScheduledTask -TaskName "FolderCleanupTask" | Get-ScheduledTaskInfo
+
+# Check if task is currently running
+(Get-ScheduledTask -TaskName "FolderCleanupTask").State
+
+# Get last execution result code
+(Get-ScheduledTaskInfo -TaskName "FolderCleanupTask").LastTaskResult
+```
+
+**Advanced Monitoring:**
+```powershell
+# View task execution history from Event Log
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'; ID=201} | 
+    Where-Object {$_.Message -like "*FolderCleanupTask*"} | 
+    Select-Object TimeCreated, LevelDisplayName, Message | 
+    Format-Table -Wrap
+
+# Monitor task in real-time (shows when it starts/stops)
+Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'; ID=100,101,102} | 
+    Where-Object {$_.Message -like "*FolderCleanupTask*"} | 
+    Select-Object TimeCreated, Id, LevelDisplayName, Message
+
+# Check application event log for cleanup script messages
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='FolderCleanupTask'} | 
+    Select-Object TimeCreated, LevelDisplayName, Message | 
+    Format-Table -Wrap
+```
+
+**Task Schedule Information:**
+```powershell
+# View next 10 scheduled execution times
+$task = Get-ScheduledTask -TaskName "FolderCleanupTask"
+$task.Triggers | ForEach-Object {
+    $trigger = $_
+    for ($i = 0; $i -lt 10; $i++) {
+        $nextRun = (Get-Date).AddMinutes($i * 20)  # Assumes 20-minute interval
+        Write-Host "Next run $($i+1): $nextRun"
+    }
+}
+
+# Check if task is set to run on schedule
+(Get-ScheduledTask -TaskName "FolderCleanupTask").Settings.Enabled
 ```
 
 ### Parameters
@@ -76,7 +132,9 @@ Stop-ScheduledTask -TaskName "FolderCleanupTask"
 The script includes comprehensive configuration options:
 - **Task Schedule**: Configurable interval (default: 20 minutes)
 - **Timestamp Patterns**: Support for multiple date/time formats in filenames
+- **Time Offset Compensation**: Adjust cutoff calculations for log files with timezone differences
 - **Folder Size Threshold**: Skip cleanup if folder is below specified size (MB)
+- **Emergency Cleanup**: Force cleanup when disk space falls below critical threshold
 - **Age Thresholds**: Different age limits per folder
 - **Safelists**: Global and per-folder protection lists
 
@@ -92,19 +150,30 @@ The script includes a working example for EKRO log cleanup:
 ```powershell
 $FoldersToClean = @(
     @{
-        Path = "C:\Users\RegestaAdm\Documents\pdf_split_rotate-main\scripts\folder_cleanup\test_folders\timestamp_cleanup_test"
+        Path = "C:\EKRO\ekro-libra\log"
         Mode = "TimestampBased"
-        AgeThresholdDays = 1/72  # 20 minutes for testing
+        AgeThresholdDays = 1/72  # 20 minutes
         LocalSafelist = @("ekr.pim.log", "monitors")
     }
 )
+
+# Folder size threshold (10 GB) - Skip cleanup if folder is smaller
+$MinimumFolderSizeMB = 10*1024
+
+# Emergency cleanup threshold (10 GB) - Force cleanup if drive space is low
+$LowDiskSpaceThresholdMB = 10240
+
+# Time offset compensation (2 hours) - For logs timestamped behind system time
+$TimestampOffsetHours = 2
 ```
 
 This configuration:
 - Runs every 20 minutes
-- Deletes files older than 20 minutes (for testing)
+- Deletes EKRO log files older than 20 minutes
 - Protects `ekr.pim.log` and `monitors` files/folders
-- Only processes folders larger than 1 MB
+- Only processes folders larger than 10 GB (unless emergency cleanup is triggered)
+- Forces cleanup if C: drive has less than 10 GB free space
+- Compensates for log timestamps being 2 hours behind system time
 
 ### Logging
 - Log files: `C:\Windows\Logs\FolderCleanupTask` (configurable)
@@ -120,6 +189,15 @@ This configuration:
 - Verify folder paths exist and are accessible
 - Check that timestamp patterns match your filename formats
 - Adjust folder size thresholds if cleanup is being skipped unexpectedly
+- Monitor disk space and emergency cleanup triggers in logs
+- Verify time offset compensation if log timestamps appear incorrect
+- Check Task Scheduler for task execution history and errors
+
+**Common Issues:**
+- **Files not being deleted**: Check if folder size is below threshold or timestamps don't match patterns
+- **Emergency cleanup not triggering**: Verify disk space thresholds and drive letter detection
+- **Timestamp parsing errors**: Use `-TestConfig` to validate patterns against your filenames
+- **Time zone issues**: Adjust `$TimestampOffsetHours` if log timestamps are offset from system time
 
 ---
 
@@ -182,4 +260,4 @@ A PowerShell utility to generate test files and folders for validating the Folde
 ## Author
 - Giovanni Misso / RegestaItalia
 - Last updated: July 2025
-- Version: 1.0 (Task Scheduler implementation)
+- Version: 1.1 (Emergency Cleanup & Time Offset Compensation)

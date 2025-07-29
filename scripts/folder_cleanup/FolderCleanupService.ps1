@@ -9,7 +9,9 @@
     
     Features:
     - Timestamp-based cleanup with configurable patterns (e.g., ekr.pim-20250718T074751.380.log)
+    - Time offset compensation for timezone differences in log timestamps
     - Folder size threshold protection
+    - Emergency cleanup mode when disk space is low (bypasses folder size thresholds)
     - Global and local safelists
     - Reliable Task Scheduler automation (runs as SYSTEM)
     - Comprehensive logging to files and Windows Event Log
@@ -69,8 +71,8 @@ $CleanupIntervalMinutes = 20
 
 # Log Configuration
 $LogPath = "C:\Windows\Logs\FolderCleanupTask"
-$MaxLogSizeMB = 50
-$MaxLogFiles = 10
+$MaxLogSizeMB = 500
+$MaxLogFiles = 100
 
 # Timestamp Configuration
 # Define multiple timestamp patterns that might appear in filenames
@@ -88,13 +90,21 @@ $DefaultAgeThresholdDays = 30
 
 # Minimum folder size threshold (in MB) - Skip cleanup if folder is smaller than this
 # Set to 0 to disable size checking
-$MinimumFolderSizeMB = 1 #10*1024
+$MinimumFolderSizeMB = 10*1024
+
+# Low disk space emergency cleanup threshold (in MB) - Force cleanup if drive free space is below this
+# When triggered, bypasses MinimumFolderSizeMB check to free up space
+$LowDiskSpaceThresholdMB = 10240  # 10 GB
+
+# Time offset compensation (in hours) - Adjust for timezone differences in log file timestamps
+# If log files are timestamped 2 hours behind system time, set this to 2
+$TimestampOffsetHours = 2
 
 # Folder Configuration
 # Each folder can have: Path, Mode, AgeThresholdDays, LocalSafelist
 $FoldersToClean = @(
     @{
-        Path = "C:\Users\RegestaAdm\Documents\pdf_split_rotate-main\scripts\folder_cleanup\test_folders\timestamp_cleanup_test"
+        Path = "C:\EKRO\ekro-libra\log"
         Mode = "TimestampBased"  # Options: "Full" or "TimestampBased"
         AgeThresholdDays = 1/72 # 1/72 is 20 min
         LocalSafelist = @("ekr.pim.log", "monitors")
@@ -237,6 +247,33 @@ function Get-FolderSizeMB {
     }
 }
 
+function Get-DiskFreeSpaceMB {
+    param([string]$DriveLetter)
+    
+    try {
+        # Ensure drive letter format (e.g., "C:" not "C:\")
+        if ($DriveLetter.EndsWith('\')) {
+            $DriveLetter = $DriveLetter.TrimEnd('\')
+        }
+        if (-not $DriveLetter.EndsWith(':')) {
+            $DriveLetter += ':'
+        }
+        
+        $drive = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='$DriveLetter'" -ErrorAction SilentlyContinue
+        if ($drive) {
+            $freeSpaceGB = [math]::Round($drive.FreeSpace / 1MB, 2)
+            return $freeSpaceGB
+        } else {
+            Write-TaskLog "Could not retrieve disk information for drive $DriveLetter" "WARN"
+            return 0
+        }
+    }
+    catch {
+        Write-TaskLog "Error calculating free space for drive $DriveLetter`: $($_.Exception.Message)" "WARN"
+        return 0
+    }
+}
+
 function Get-TimestampFromFilename {
     param([string]$FileName)
     
@@ -310,7 +347,7 @@ function Clean-FolderTimestampBased {
         [array]$LocalSafelist
     )
     
-    Write-TaskLog "Starting timestamp-based cleanup of folder: $FolderPath (Age threshold: $AgeThresholdDays days)"
+    Write-TaskLog "Starting timestamp-based cleanup of folder: $FolderPath (Age threshold: $AgeThresholdDays days, Time offset: $TimestampOffsetHours hours)"
     $deletedCount = 0
     $skippedCount = 0
     $noTimestampCount = 0
@@ -321,7 +358,11 @@ function Clean-FolderTimestampBased {
             return
         }
         
-        $cutoffDate = (Get-Date).AddDays(-$AgeThresholdDays)
+        # Adjust cutoff time to account for timestamp offset
+        $adjustedCurrentTime = (Get-Date).AddHours(-$TimestampOffsetHours)
+        $cutoffDate = $adjustedCurrentTime.AddDays(-$AgeThresholdDays)
+        Write-TaskLog "Current time: $(Get-Date), Adjusted time (minus $TimestampOffsetHours hours): $adjustedCurrentTime, Cutoff date: $cutoffDate"
+        
         $items = Get-ChildItem -Path $FolderPath -Force
         
         foreach ($item in $items) {
@@ -384,15 +425,30 @@ function Start-CleanupProcess {
                 continue
             }
             
-            # Check folder size if threshold is set
-            if ($MinimumFolderSizeMB -gt 0) {
+            # Check disk space for emergency cleanup
+            $driveLetter = Split-Path $folderConfig.Path -Qualifier
+            $freeSpaceMB = Get-DiskFreeSpaceMB -DriveLetter $driveLetter
+            $emergencyCleanup = $false
+            
+            if ($LowDiskSpaceThresholdMB -gt 0 -and $freeSpaceMB -lt $LowDiskSpaceThresholdMB) {
+                $emergencyCleanup = $true
+                Write-TaskLog "EMERGENCY CLEANUP TRIGGERED - Low disk space on drive $driveLetter`: $freeSpaceMB MB < $LowDiskSpaceThresholdMB MB threshold" "WARN"
+            }
+            
+            # Check folder size if threshold is set (unless emergency cleanup is triggered)
+            if ($MinimumFolderSizeMB -gt 0 -and -not $emergencyCleanup) {
                 $folderSizeMB = Get-FolderSizeMB -FolderPath $folderConfig.Path
-                Write-TaskLog "Folder size: $folderSizeMB MB (Threshold: $MinimumFolderSizeMB MB)"
+                Write-TaskLog "Folder size: $folderSizeMB MB (Threshold: $MinimumFolderSizeMB MB) - Drive $driveLetter free space: $freeSpaceMB MB"
                 
                 if ($folderSizeMB -lt $MinimumFolderSizeMB) {
                     Write-TaskLog "Skipping cleanup - folder size ($folderSizeMB MB) is below threshold ($MinimumFolderSizeMB MB)"
                     continue
                 }
+            } elseif ($emergencyCleanup) {
+                $folderSizeMB = Get-FolderSizeMB -FolderPath $folderConfig.Path
+                Write-TaskLog "Emergency cleanup mode - bypassing folder size threshold. Folder size: $folderSizeMB MB, Drive $driveLetter free space: $freeSpaceMB MB"
+            } else {
+                Write-TaskLog "Drive $driveLetter free space: $freeSpaceMB MB (Low disk threshold: $LowDiskSpaceThresholdMB MB)"
             }
             
             # Proceed with cleanup
@@ -515,8 +571,14 @@ function Test-Configuration {
         
         if ($exists) {
             $folderSizeMB = Get-FolderSizeMB -FolderPath $folderPath
+            $driveLetter = Split-Path $folderPath -Qualifier
+            $freeSpaceMB = Get-DiskFreeSpaceMB -DriveLetter $driveLetter
+            
             $sizeStatus = if ($MinimumFolderSizeMB -gt 0 -and $folderSizeMB -lt $MinimumFolderSizeMB) { " (BELOW THRESHOLD)" } else { "" }
+            $diskStatus = if ($LowDiskSpaceThresholdMB -gt 0 -and $freeSpaceMB -lt $LowDiskSpaceThresholdMB) { " (LOW DISK SPACE!)" } else { "" }
+            
             Write-Host "  [EXISTS] $folderPath (Mode: $folderMode, Size: $folderSizeMB MB)$sizeStatus" -ForegroundColor $(if ($sizeStatus) { "Yellow" } else { "Green" })
+            Write-Host "           Drive $driveLetter Free Space: $freeSpaceMB MB$diskStatus" -ForegroundColor $(if ($diskStatus) { "Red" } else { "Cyan" })
         } else {
             Write-Host "  [NOT FOUND] $folderPath (Mode: $folderMode)" -ForegroundColor Red
         }
@@ -525,6 +587,15 @@ function Test-Configuration {
     if ($MinimumFolderSizeMB -gt 0) {
         Write-Host ""
         Write-Host "Minimum folder size threshold: $MinimumFolderSizeMB MB" -ForegroundColor Cyan
+    }
+    
+    if ($LowDiskSpaceThresholdMB -gt 0) {
+        Write-Host "Low disk space emergency threshold: $LowDiskSpaceThresholdMB MB" -ForegroundColor Cyan
+    }
+    
+    if ($TimestampOffsetHours -gt 0) {
+        Write-Host "Timestamp offset compensation: $TimestampOffsetHours hours" -ForegroundColor Cyan
+        Write-Host "  (Log timestamps are assumed to be $TimestampOffsetHours hours behind system time)" -ForegroundColor Yellow
     }
     
     Write-Host ""
@@ -559,6 +630,7 @@ elseif ($DryRun) {
     $totalProtected = 0
     $totalErrors = 0
     $totalSkippedSize = 0
+    $totalEmergencyCleanup = 0
     
     foreach ($folderConfig in $FoldersToClean) {
         Write-Host "`nFolder: $($folderConfig.Path)" -ForegroundColor White
@@ -569,16 +641,32 @@ elseif ($DryRun) {
             continue
         }
         
+        # Check disk space for emergency cleanup
+        $driveLetter = Split-Path $folderConfig.Path -Qualifier
+        $freeSpaceMB = Get-DiskFreeSpaceMB -DriveLetter $driveLetter
+        $emergencyCleanup = $false
+        
+        if ($LowDiskSpaceThresholdMB -gt 0 -and $freeSpaceMB -lt $LowDiskSpaceThresholdMB) {
+            $emergencyCleanup = $true
+            Write-Host "  [EMERGENCY] Low disk space on drive $driveLetter`: $freeSpaceMB MB < $LowDiskSpaceThresholdMB MB - FORCING CLEANUP" -ForegroundColor Red
+            $totalEmergencyCleanup++
+        }
+        
         # Check folder size
         if ($MinimumFolderSizeMB -gt 0) {
             $folderSizeMB = Get-FolderSizeMB -FolderPath $folderConfig.Path
             Write-Host "  Folder size: $folderSizeMB MB (Threshold: $MinimumFolderSizeMB MB)" -ForegroundColor Cyan
+            Write-Host "  Drive $driveLetter free space: $freeSpaceMB MB (Emergency threshold: $LowDiskSpaceThresholdMB MB)" -ForegroundColor Cyan
             
-            if ($folderSizeMB -lt $MinimumFolderSizeMB) {
+            if ($folderSizeMB -lt $MinimumFolderSizeMB -and -not $emergencyCleanup) {
                 Write-Host "  [SKIP] Folder size below threshold - no cleanup needed" -ForegroundColor Yellow
                 $totalSkippedSize++
                 continue
+            } elseif ($emergencyCleanup) {
+                Write-Host "  [EMERGENCY MODE] Bypassing folder size threshold due to low disk space" -ForegroundColor Red
             }
+        } else {
+            Write-Host "  Drive $driveLetter free space: $freeSpaceMB MB (Emergency threshold: $LowDiskSpaceThresholdMB MB)" -ForegroundColor Cyan
         }
         
         $items = Get-ChildItem -Path $folderConfig.Path -Force -ErrorAction SilentlyContinue
@@ -597,12 +685,14 @@ elseif ($DryRun) {
                         Write-Host "  [IGNORE] $($item.Name) (no timestamp)" -ForegroundColor Yellow
                         $totalIgnored++
                     } else {
-                        $cutoffDate = (Get-Date).AddDays(-$folderConfig.AgeThresholdDays)
+                        # Adjust cutoff time to account for timestamp offset
+                        $adjustedCurrentTime = (Get-Date).AddHours(-$TimestampOffsetHours)
+                        $cutoffDate = $adjustedCurrentTime.AddDays(-$folderConfig.AgeThresholdDays)
                         if ($timestamp -lt $cutoffDate) {
-                            Write-Host "  [DELETE] $($item.Name) (old: $timestamp)" -ForegroundColor Red
+                            Write-Host "  [DELETE] $($item.Name) (old: $timestamp, cutoff: $cutoffDate)" -ForegroundColor Red
                             $totalToDelete++
                         } else {
-                            Write-Host "  [KEEP] $($item.Name) (recent: $timestamp)" -ForegroundColor Green
+                            Write-Host "  [KEEP] $($item.Name) (recent: $timestamp, cutoff: $cutoffDate)" -ForegroundColor Green
                             $totalToKeep++
                         }
                     }
@@ -622,6 +712,7 @@ elseif ($DryRun) {
     Write-Host "  Ignored (no timestamp): $totalIgnored" -ForegroundColor Yellow
     Write-Host "  Protected: $totalProtected" -ForegroundColor Blue
     Write-Host "  Skipped (size threshold): $totalSkippedSize" -ForegroundColor Yellow
+    Write-Host "  Emergency cleanup triggered: $totalEmergencyCleanup" -ForegroundColor Red
     Write-Host "  Errors: $totalErrors" -ForegroundColor Magenta
 }
 else {
