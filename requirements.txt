@@ -7,3 +7,6 @@ python-dotenv
 PyPDF2
 tabulate
 tqdm
+pyarrow
+fastparquet
+pandas
