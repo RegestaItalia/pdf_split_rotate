@@ -7,6 +7,10 @@ samples/*
 
 processed_files.txt
 
+# Elasticsearch schema analysis results
+scripts/es_schema_validate/results/*
+!scripts/es_schema_validate/results/.gitkeep
+
 !.gitkeep
 
 # Python bytecode files
