@@ -26,16 +26,15 @@ ES_USER         = os.getenv("ES_USER", "elastic")
 ES_PASS         = os.getenv("ES_PASS", "Mf_ydvioCE2EhC6yfk=9")
 ES_CA_CERT      = os.getenv("ES_CA_CERT", "scripts/es_schema_validate/http_ca.crt")  # Path to CA certificate
 INDEX_NAME      = os.getenv("INDEX_NAME", "rl_fattura")
+KIBANA_URL      = os.getenv("KIBANA_URL", "http://10.0.1.5:5601")  # Kibana URL for document links (HTTP to avoid certificate issues)
 
 # Discovery / performance knobs
-SAMPLE_DOCS     = int(os.getenv("SAMPLE_DOCS", "5000"))   # docs to sample in pass 1 (0 = skip, use all in pass 2 only)
-CORE_THRESHOLD  = float(os.getenv("CORE_THRESHOLD", "0.90"))  # field presence ratio to be considered 'core'
 PAGE_SIZE       = int(os.getenv("PAGE_SIZE", "1000"))
 QUERY_JSON      = None  # e.g., {"range": {"@timestamp": {"gte": "now-90d"}}}
 TIMEOUT         = os.getenv("ES_TIMEOUT", "2m")
 
 # Behavior flags
-STRICT_MODE     = (os.getenv("STRICT_MODE", "true").lower() == "true")  # if true, ignore core detection and fingerprint all fields (presence creates new schemas)
+STRICT_MODE     = (os.getenv("STRICT_MODE", "true").lower() == "true")  # if true, every field presence/absence creates new schemas. if false, group by structure only (ignore missing fields)
 CSV_OUT         = os.getenv("CSV_OUT")  # e.g., "schemas.csv"
 
 # -----------------------------
@@ -181,7 +180,7 @@ def check_index_exists(es, index_name):
 # Utilities
 # -----------------------------
 def iter_docs(es, index, query=None, page_size=1000, timeout="2m"):
-    """Stream _source docs using helpers.scan."""
+    """Stream docs with both _source and metadata using helpers.scan."""
     try:
         print(f"[DEBUG] Starting document iteration for index '{index}' with page_size={page_size}")
         for hit in helpers.scan(
@@ -194,7 +193,8 @@ def iter_docs(es, index, query=None, page_size=1000, timeout="2m"):
             scroll=timeout,
             _source=True
         ):
-            yield hit.get("_source", {})
+            # Yield both source and metadata
+            yield hit.get("_source", {}), hit.get("_id"), hit.get("_index")
     except Exception as e:
         print(f"[ERROR] Failed to iterate documents from index '{index}': {e}")
         print(f"[ERROR] Exception type: {type(e).__name__}")
@@ -253,76 +253,69 @@ def get_by_path(src, path):
     return cur
 
 # -----------------------------
-# Pass 1: discover core fields
+# Schema signature functions
 # -----------------------------
-def discover_core_fields(es, index, sample_docs, threshold, query=None):
-    if STRICT_MODE:
-        return set(), 0  # unused in strict mode
-    if sample_docs == 0:
-        # Skip discovery; core will be determined as empty -> all docs collapse to EMPTY_CORE (not useful)
-        # So we recommend at least a small sample.
-        print("[WARN] SAMPLE_DOCS=0; skipping core discovery. Consider setting SAMPLE_DOCS to e.g. 2000.", file=sys.stderr)
-        return set(), 0
-
-    field_counts = Counter()
-    total = 0
-    try:
-        print(f"[DEBUG] Starting core field discovery with {sample_docs} samples...")
-        for i, src in enumerate(iter_docs(es, index, query=query, page_size=PAGE_SIZE, timeout=TIMEOUT), start=1):
-            seen_paths = set()
-            for path, val in walk_paths(src):
-                if not path:  # root non-scalar
-                    continue
-                seen_paths.add(path)
-            for p in seen_paths:
-                field_counts[p] += 1
-
-            if i >= sample_docs:
-                total = i
-                break
-    except Exception as e:
-        print(f"[ERROR] Failed during core field discovery: {e}")
-        raise
-        
-    if total == 0:
-        print("[INFO] No documents sampled; index empty?", file=sys.stderr)
-        return set(), 0
-
-    core = {p for p, c in field_counts.items() if c / total >= threshold}
-    return core, total
-
-# -----------------------------
-# Pass 2: compute schema counts
-# -----------------------------
-def schema_signature(src, core_fields):
-    """Fingerprint based on types of *core* fields only. Missing is ignored (does not split)."""
-    parts = []
-    for f in core_fields:
-        v = get_by_path(src, f)
-        if v is None:
-            continue  # missing -> ignore
-        parts.append(f"{f}:{typeof(v)}")
-    parts.sort()
-    return "EMPTY_CORE" if not parts else "|".join(parts)
+def normalize_dict_order(obj):
+    """Recursively normalize dictionary order to ensure consistent schema comparison.
+    Only hierarchy matters, not field order at the same level."""
+    if isinstance(obj, dict):
+        # Create a new ordered dict with sorted keys
+        normalized = {}
+        for key in sorted(obj.keys()):
+            normalized[key] = normalize_dict_order(obj[key])
+        return normalized
+    elif isinstance(obj, list):
+        # Normalize each element in the list
+        return [normalize_dict_order(item) for item in obj]
+    else:
+        # Return scalar values as-is
+        return obj
 
 def schema_signature_strict(src):
-    """Fingerprint all present fields (presence/extra fields split schemas)."""
+    """STRICT MODE: Fingerprint all present fields (presence/extra fields split schemas)."""
+    # Normalize field order before generating signature
+    normalized_src = normalize_dict_order(src)
     parts = []
-    for path, val in walk_paths(src):
+    for path, val in walk_paths(normalized_src):
         if not path:
             continue
         parts.append(f"{path}:{typeof(val)}")
     parts.sort()
     return "|".join(parts) if parts else "EMPTY"
 
-def count_schemas(es, index, core_fields, query=None):
+def schema_signature_hierarchy(src):
+    """HIERARCHY MODE: Group by structure only, ignore missing fields.
+    Creates a signature based on all field types present, but documents with 
+    the same structure (ignoring missing fields) get the same signature."""
+    # Normalize field order before generating signature
+    normalized_src = normalize_dict_order(src)
+    parts = []
+    for path, val in walk_paths(normalized_src):
+        if not path:
+            continue
+        parts.append(f"{path}:{typeof(val)}")
+    parts.sort()
+    return "|".join(parts) if parts else "EMPTY"
+
+def count_schemas(es, index, query=None):
     counts = Counter()
+    schema_docs = {}  # Store document IDs for each schema
     total = 0
     try:
         print(f"[DEBUG] Starting schema counting for index '{index}'...")
-        for src in iter_docs(es, index, query=query, page_size=PAGE_SIZE, timeout=TIMEOUT):
-            sig = schema_signature_strict(src) if STRICT_MODE else schema_signature(src, core_fields)
+        for src, doc_id, doc_index in iter_docs(es, index, query=query, page_size=PAGE_SIZE, timeout=TIMEOUT):
+            sig = schema_signature_strict(src) if STRICT_MODE else schema_signature_hierarchy(src)
             counts[sig] += 1
+            
+            # Store document ID for this schema
+            if sig not in schema_docs:
+                schema_docs[sig] = []
+            schema_docs[sig].append({
+                'id': doc_id,
+                'index': doc_index or index,
+                'preview': generate_doc_preview(src)
+            })
+            
             total += 1
             if total % 1000 == 0:
                 print(f"[DEBUG] Processed {total} documents...")
@@ -331,7 +324,52 @@ def count_schemas(es, index, core_fields, query=None):
         raise
     
     print(f"[DEBUG] Completed schema counting. Total documents: {total}")
-    return counts, total
+    return counts, schema_docs, total
+
+def generate_doc_preview(src):
+    """Generate a short preview of the document content for display."""
+    preview_fields = []
+    
+    # Try to find common identifying fields
+    identifying_fields = [
+        'RL_FATTURA.RL_FATTURA_Masterdata.Numero',
+        'RL_FATTURA.RL_FATTURA_Masterdata.Data', 
+        'RL_FATTURA.RL_FATTURA_Masterdata.Fornitore.Ragione_Sociale',
+        'RL_FATTURA.RL_FATTURA_Masterdata.Acquirente.Ragione_Sociale',
+        'RL_FATTURA.Documento-Originale.Nome_Documento'
+    ]
+    
+    for field in identifying_fields:
+        value = get_by_path(src, field)
+        if value and len(preview_fields) < 3:
+            field_name = field.split('.')[-1]  # Get last part of field name
+            preview_fields.append(f"{field_name}: {str(value)[:50]}")
+    
+    # If no identifying fields found, show first few fields
+    if not preview_fields:
+        for path, val in walk_paths(src):
+            if path and len(preview_fields) < 3:
+                field_name = path.split('.')[-1]
+                preview_fields.append(f"{field_name}: {str(val)[:30]}")
+    
+    return " | ".join(preview_fields) if preview_fields else "No preview available"
+
+def generate_kibana_url(doc_id, index_name):
+    """Generate a Kibana URL for viewing a specific document."""
+    import urllib.parse
+    
+    # Clean the document ID: remove trailing dashes and handle special characters
+    cleaned_doc_id = str(doc_id).rstrip('-').strip()
+    
+    # For Kibana search, we might want to escape special characters but keep it readable
+    # Use quote_plus for better URL encoding or just quote specific problematic chars
+    encoded_doc_id = urllib.parse.quote(cleaned_doc_id, safe='')
+    
+    # Use the correct dataViewId: c240470e-7d0b-4b04-9626-30ddcfee384f
+    # This matches the format Kibana uses internally
+    kibana_url = f"{KIBANA_URL}/app/discover#/?_g=(filters:!(),time:(from:now-30d,to:now))&_a=(columns:!(),dataSource:(dataViewId:c240470e-7d0b-4b04-9626-30ddcfee384f,type:dataView),filters:!(),interval:auto,query:(language:kuery,query:{encoded_doc_id}),sort:!())"
+    
+    return kibana_url
 
 # -----------------------------
 # Main
@@ -392,29 +430,15 @@ def main():
             print(f"[ERROR] HTTP Status Code: {e.status_code}")
         sys.exit(1)
     
-    # Pass 1: discover core
-    try:
-        core_fields, sampled = discover_core_fields(es, INDEX_NAME, SAMPLE_DOCS, CORE_THRESHOLD, QUERY_JSON)
-        if STRICT_MODE:
-            print("[INFO] STRICT_MODE=true → skipping core discovery and using all present fields per doc.")
-        else:
-            print(f"[INFO] Sampled {sampled} docs → discovered {len(core_fields)} core fields (threshold={CORE_THRESHOLD:.2f}).")
-            # Show a preview of the top 20 core fields
-            preview = list(sorted(core_fields))[:20]
-            if preview:
-                print("[INFO] Core fields (first 20):")
-                for f in preview:
-                    print("  -", f)
-            if not core_fields:
-                print("[WARN] No core fields discovered. Consider lowering CORE_THRESHOLD or increasing SAMPLE_DOCS.", file=sys.stderr)
-    except Exception as e:
-        print(f"[ERROR] Failed during core field discovery: {e}")
-        print(f"[ERROR] Exception type: {type(e).__name__}")
-        sys.exit(1)
+    # Schema analysis mode
+    if STRICT_MODE:
+        print("[INFO] STRICT_MODE=true → Every field presence/absence creates different schemas")
+    else:
+        print("[INFO] STRICT_MODE=false → Grouping by structure only, ignoring missing fields")
 
-    # Pass 2: count schemas
+    # Count schemas
     try:
-        counts, total = count_schemas(es, INDEX_NAME, core_fields, QUERY_JSON)
+        counts, schema_docs, total = count_schemas(es, INDEX_NAME, QUERY_JSON)
         if total == 0:
             print("No documents found.")
             return
@@ -428,23 +452,33 @@ def main():
                 return set()
             return set(field.split(':')[0] for field in sig.split('|'))
         
-        schema_fields = [(sig, n, pct, parse_signature(sig)) for sig, n, pct in rows]
+        schema_fields = [(sig, n, pct, parse_signature(sig), schema_docs.get(sig, [])) for sig, n, pct in rows]
         
         # Prepare output content
         output_lines = []
         output_lines.append("=== Schema breakdown ===")
-        output_lines.append(f"Index: {INDEX_NAME} | Total docs: {total} | Mode: {'STRICT' if STRICT_MODE else 'CORE-BASED'}")
+        output_lines.append(f"Index: {INDEX_NAME} | Total docs: {total} | Mode: {'STRICT' if STRICT_MODE else 'HIERARCHY'}")
         output_lines.append(f"Generated on: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         output_lines.append("")
         
-        # Add core fields info if not in strict mode
-        if not STRICT_MODE and core_fields:
-            output_lines.append(f"Core fields discovered ({len(core_fields)} total, threshold={CORE_THRESHOLD:.2f}):")
-            for f in sorted(core_fields)[:50]:  # Show first 50 core fields
-                output_lines.append(f"  - {f}")
-            if len(core_fields) > 50:
-                output_lines.append(f"  ... and {len(core_fields) - 50} more")
-            output_lines.append("")
+        # Add run configuration
+        output_lines.append("=" * 80)
+        output_lines.append("RUN CONFIGURATION")
+        output_lines.append("=" * 80)
+        output_lines.append(f"Elasticsearch URL: {ES_URL}")
+        output_lines.append(f"Index: {INDEX_NAME}")
+        output_lines.append(f"Strict Mode: {STRICT_MODE}")
+        output_lines.append(f"Page Size: {PAGE_SIZE}")
+        output_lines.append(f"Timeout: {TIMEOUT}")
+        output_lines.append(f"Query Filter: {QUERY_JSON if QUERY_JSON else 'None (all documents)'}")
+        output_lines.append(f"CSV Output: {CSV_OUT if CSV_OUT else 'None'}")
+        output_lines.append(f"CA Certificate: {ES_CA_CERT}")
+        output_lines.append("")
+        
+        # Add mode info
+        mode_desc = "Every field presence/absence creates different schemas" if STRICT_MODE else "Grouping by structure only, ignoring missing fields"
+        output_lines.append(f"Analysis mode: {mode_desc}")
+        output_lines.append("")
         
         # Add schema breakdown with enhanced readability
         output_lines.append("=" * 80)
@@ -453,13 +487,13 @@ def main():
         
         # Get all unique fields across all schemas for comparison
         all_fields = set()
-        for _, _, _, fields in schema_fields:
+        for _, _, _, fields, _ in schema_fields:
             all_fields.update(fields)
         
         # Most common schema as baseline
         baseline_fields = schema_fields[0][3] if schema_fields else set()
         
-        for i, (sig, n, pct, fields) in enumerate(schema_fields, start=1):
+        for i, (sig, n, pct, fields, docs) in enumerate(schema_fields, start=1):
             output_lines.append("")
             output_lines.append(f"SCHEMA #{i} - {n} docs ({pct})")
             output_lines.append("-" * 60)
@@ -519,7 +553,7 @@ def main():
         
         # Analyze field frequency across all schemas
         field_frequency = {}
-        for _, n, _, fields in schema_fields:
+        for _, n, _, fields, _ in schema_fields:
             for field in fields:
                 if field not in field_frequency:
                     field_frequency[field] = 0
@@ -546,15 +580,302 @@ def main():
             display_name = field.replace('RL_FATTURA.', '')
             output_lines.append(f"  ⚠️  {display_name} (present in {pct} of docs)")
         
+        # Generate HTML content instead of plain text
+        from html import escape as _esc
+        def h(s): 
+            return _esc(str(s), quote=True)
+
+        def generate_html_report():
+            html_lines = []
+            
+            # HTML Header with CSS for collapsible sections
+            html_lines.append("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elasticsearch Schema Analysis Report</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; margin-top: 30px; }
+        h3 { color: #7f8c8d; margin-top: 20px; }
+        .config-section { background-color: #ecf0f1; padding: 15px; border-radius: 5px; margin: 15px 0; }
+        .config-item { margin: 5px 0; }
+        .config-label { font-weight: bold; color: #2c3e50; }
+        .summary-stats { display: flex; gap: 20px; margin: 20px 0; }
+        .stat-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 8px; text-align: center; flex: 1; }
+        .stat-number { font-size: 2em; font-weight: bold; }
+        .stat-label { font-size: 0.9em; opacity: 0.9; }
+        
+        /* Collapsible sections */
+        .collapsible { background-color: #34495e; color: white; cursor: pointer; padding: 15px; border: none; text-align: left; outline: none; font-size: 16px; width: 100%; border-radius: 4px; margin: 5px 0; transition: 0.3s; }
+        .collapsible:hover { background-color: #2c3e50; }
+        .collapsible.active { background-color: #3498db; }
+        .collapsible:after { content: '\\002B'; color: white; font-weight: bold; float: right; margin-left: 5px; }
+        .collapsible.active:after { content: "\\2212"; }
+        .content { padding: 0 18px; background-color: #f8f9fa; max-height: 0; overflow: hidden; transition: max-height 0.2s ease-out; border-radius: 0 0 4px 4px; }
+        .content.active { max-height: 80vh; padding: 18px; overflow-y: auto; }
+        
+        /* Schema styling */
+        .schema-item { margin: 20px 0; border: 1px solid #bdc3c7; border-radius: 8px; overflow: hidden; }
+        .schema-header { background: linear-gradient(90deg, #3498db, #2980b9); color: white; padding: 15px; cursor: pointer; }
+        .schema-header:hover { background: linear-gradient(90deg, #2980b9, #2c3e50); }
+        .schema-content { padding: 20px; background: white; }
+        .field-hierarchy { margin: 10px 0; }
+        .hierarchy-group { margin: 15px 0; border-left: 3px solid #3498db; padding-left: 15px; }
+        .hierarchy-title { font-weight: bold; color: #2c3e50; margin-bottom: 10px; }
+        .field-item { padding: 5px 10px; margin: 2px 0; background-color: #ecf0f1; border-radius: 4px; font-family: monospace; }
+        .field-type-string { border-left: 4px solid #e74c3c; }
+        .field-type-number { border-left: 4px solid #f39c12; }
+        .field-type-array { border-left: 4px solid #9b59b6; }
+        .field-type-object { border-left: 4px solid #27ae60; }
+        .field-type-other { border-left: 4px solid #95a5a6; }
+        
+        /* Document list styling */
+        .doc-section { margin: 15px 0; }
+        .doc-toggle { background-color: #27ae60; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; font-size: 14px; transition: 0.3s; }
+        .doc-toggle:hover { background-color: #229954; }
+        .doc-list { margin-top: 10px; }
+        
+        /* Differences styling */
+        .diff-missing { color: #e74c3c; font-weight: bold; }
+        .diff-extra { color: #27ae60; font-weight: bold; }
+        .always-present { color: #27ae60; }
+        .sometimes-missing { color: #f39c12; }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .summary-stats { flex-direction: column; }
+            .container { margin: 10px; padding: 15px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">""")
+            
+            # Title and basic info
+            html_lines.append(f"<h1>📊 Elasticsearch Schema Analysis Report</h1>")
+            html_lines.append(f"<p><strong>Index:</strong> {INDEX_NAME} | <strong>Total Documents:</strong> {total:,} | <strong>Mode:</strong> {'STRICT' if STRICT_MODE else 'HIERARCHY'}</p>")
+            html_lines.append(f"<p><strong>Generated:</strong> {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
+            
+            # Summary statistics
+            html_lines.append('<div class="summary-stats">')
+            html_lines.append(f'<div class="stat-card"><div class="stat-number">{len(rows)}</div><div class="stat-label">Unique Schemas</div></div>')
+            html_lines.append(f'<div class="stat-card"><div class="stat-number">{len(all_fields)}</div><div class="stat-label">Total Fields</div></div>')
+            html_lines.append(f'<div class="stat-card"><div class="stat-number">{len(always_present)}</div><div class="stat-label">Always Present Fields</div></div>')
+            html_lines.append(f'<div class="stat-card"><div class="stat-number">{len(sometimes_missing)}</div><div class="stat-label">Sometimes Missing Fields</div></div>')
+            html_lines.append('</div>')
+            
+            # Configuration section (collapsible)
+            html_lines.append('<button class="collapsible">🔧 Run Configuration</button>')
+            html_lines.append('<div class="content">')
+            html_lines.append('<div class="config-section">')
+            html_lines.append(f'<div class="config-item"><span class="config-label">Elasticsearch URL:</span> {ES_URL}</div>')
+            html_lines.append(f'<div class="config-item"><span class="config-label">Index:</span> {INDEX_NAME}</div>')
+            html_lines.append(f'<div class="config-item"><span class="config-label">Strict Mode:</span> {STRICT_MODE}</div>')
+            html_lines.append(f'<div class="config-item"><span class="config-label">Analysis Mode:</span> {"Every field presence/absence creates different schemas" if STRICT_MODE else "Grouping by structure only, ignoring missing fields"}</div>')
+            html_lines.append(f'<div class="config-item"><span class="config-label">Page Size:</span> {PAGE_SIZE}</div>')
+            html_lines.append(f'<div class="config-item"><span class="config-label">Timeout:</span> {TIMEOUT}</div>')
+            html_lines.append(f'<div class="config-item"><span class="config-label">Query Filter:</span> {QUERY_JSON if QUERY_JSON else "None (all documents)"}</div>')
+            html_lines.append(f'<div class="config-item"><span class="config-label">CSV Output:</span> {CSV_OUT if CSV_OUT else "None"}</div>')
+            html_lines.append('</div></div>')
+            
+            # Field presence analysis (collapsible)
+            html_lines.append('<button class="collapsible">📈 Field Presence Analysis</button>')
+            html_lines.append('<div class="content">')
+            html_lines.append('<h3>Fields Always Present</h3>')
+            if always_present:
+                for field in sorted(always_present):
+                    display_name = field.replace('RL_FATTURA.', '')
+                    html_lines.append(f'<div class="field-item always-present">✅ {display_name}</div>')
+            else:
+                html_lines.append('<p>No fields are present in all documents.</p>')
+            
+            html_lines.append('<h3>Fields Sometimes Missing</h3>')
+            if sometimes_missing:
+                for field, freq, pct in sorted(sometimes_missing, key=lambda x: x[1], reverse=True):
+                    display_name = field.replace('RL_FATTURA.', '')
+                    html_lines.append(f'<div class="field-item sometimes-missing">⚠️ {display_name} (present in {pct} of docs)</div>')
+            else:
+                html_lines.append('<p>All fields are consistently present.</p>')
+            html_lines.append('</div>')
+            
+            # Schema breakdown - main collapsible section
+            html_lines.append('<button class="collapsible">🔍 Schema Breakdown by Frequency</button>')
+            html_lines.append('<div class="content">')
+            
+            for i, (sig, n, pct, fields, docs) in enumerate(schema_fields, start=1):
+                # === Schema item wrapper ===
+                html_lines.append('<div class="schema-item">')
+
+                # Header (clickable)
+                html_lines.append(
+                    f'<div class="schema-header" onclick="toggleSchema({i})">'
+                    f'<strong>{h("Schema #"+str(i))}</strong> - {h(f"{n:,}")} documents ({h(pct)}) - {h(len(fields))} fields'
+                    f'</div>'
+                )
+
+                # Content container (initially hidden)
+                html_lines.append(f'<div id="schema-{i}" class="schema-content" style="display: none;">')
+
+                if sig in ["EMPTY", "EMPTY_CORE"]:
+                    html_lines.append('<p><em>Empty schema - no fields present</em></p>')
+                else:
+                    # --- Differences from baseline (schema #1) ---
+                    if i > 1:
+                        missing_from_baseline = baseline_fields - fields
+                        extra_from_baseline   = fields - baseline_fields
+
+                        if missing_from_baseline or extra_from_baseline:
+                            html_lines.append('<h4>Differences from Most Common Schema:</h4>')
+                            if missing_from_baseline:
+                                html_lines.append(f'<p><strong class="diff-missing">Missing ({len(missing_from_baseline)} fields):</strong></p>')
+                                for field in sorted(missing_from_baseline):
+                                    display_name = field.replace('RL_FATTURA.', '')
+                                    html_lines.append(f'<div class="field-item diff-missing">❌ {h(display_name)}</div>')
+                            if extra_from_baseline:
+                                html_lines.append(f'<p><strong class="diff-extra">Extra ({len(extra_from_baseline)} fields):</strong></p>')
+                                for field in sorted(extra_from_baseline):
+                                    display_name = field.replace('RL_FATTURA.', '')
+                                    html_lines.append(f'<div class="field-item diff-extra">➕ {h(display_name)}</div>')
+
+                    # --- Fields by hierarchy ---
+                    field_hierarchy = {}
+                    for field_with_type in sig.split('|'):
+                        if ':' not in field_with_type:
+                            continue
+                        field_name, field_type = field_with_type.split(':', 1)  # keep right side intact
+
+                        parts = field_name.split('.')
+                        top_level = (parts[1] if parts and parts[0] == 'RL_FATTURA' and len(parts) > 1 else parts[0]) if parts else 'ROOT'
+                        field_hierarchy.setdefault(top_level, []).append((field_name, field_type))
+
+                    html_lines.append('<h4>Fields by Hierarchy:</h4>')
+                    for hierarchy in sorted(field_hierarchy.keys()):
+                        html_lines.append('<div class="hierarchy-group">')
+                        html_lines.append(f'<div class="hierarchy-title">📁 {h(hierarchy)}</div>')
+                        for field_name, field_type in sorted(field_hierarchy[hierarchy]):
+                            display_name = field_name.replace('RL_FATTURA.', '')
+                            # stable class name
+                            type_class = ("string" if field_type == "string"
+                                        else "number" if field_type in ("long", "double")
+                                        else "array" if "array" in field_type
+                                        else "object" if field_type == "object"
+                                        else "other")
+                            type_icon = ("📄" if field_type == "string"
+                                        else "🔢" if field_type in ("long", "double")
+                                        else "📋" if "array" in field_type
+                                        else "🔸")
+                            html_lines.append(
+                                f'<div class="field-item field-type-{type_class}">'
+                                f'{type_icon} {h(display_name)} <code>({h(field_type)})</code></div>'
+                            )
+                        html_lines.append('</div>')  # close .hierarchy-group
+
+                    # --- Documents list (optional) ---
+                    if docs:
+                        html_lines.append('<h4>Documents with this Schema:</h4>')
+                        html_lines.append('<div class="doc-section">')
+                        html_lines.append(f'<button class="doc-toggle" onclick="toggleDocs({i})">📄 Show/Hide {h(len(docs))} Documents</button>')
+                        html_lines.append(
+                            f'<div id="docs-{i}" class="doc-list" '
+                            'style="display: none; max-height: 300px; overflow-y: auto; '
+                            'border: 1px solid #ddd; padding: 10px; border-radius: 4px; margin-top: 10px;">'
+                        )
+
+                        for doc_data in docs[:50]:
+                            doc_id      = doc_data.get('id', '')
+                            doc_index   = doc_data.get('index', INDEX_NAME)
+                            doc_preview = doc_data.get('preview', '')
+                            kibana_url  = generate_kibana_url(doc_id, doc_index)
+
+                            html_lines.append(
+                                '<div style="margin: 5px 0; padding: 8px; background-color: #f8f9fa; '
+                                'border-radius: 4px; border-left: 3px solid #3498db;">'
+                            )
+                            html_lines.append(
+                                f'<a href="{h(kibana_url)}" target="_blank" '
+                                'style="text-decoration: none; color: #2c3e50; font-family: monospace;">'
+                                f'🔗 {h(doc_id)}</a>'
+                            )
+                            html_lines.append(f'<div style="font-size: 0.9em; color: #666; margin-top: 4px;">{h(doc_preview)}</div>')
+                            html_lines.append('</div>')  # close doc card
+
+                        if len(docs) > 50:
+                            html_lines.append(
+                                '<div style="margin: 10px 0; padding: 8px; background-color: #fff3cd; '
+                                'border-radius: 4px; color: #856404;">'
+                                f'⚠️ Showing first 50 of {h(len(docs))} documents'
+                                '</div>'
+                            )
+
+                        html_lines.append('</div>')  # close #docs-{i}
+                        html_lines.append('</div>')  # close .doc-section
+
+                # Close content + item (exactly one each)
+                html_lines.append('</div>')  # close .schema-content
+                html_lines.append('</div>')  # close .schema-item
+            
+            # JavaScript for interactivity
+            html_lines.append("""
+    </div>
+    <script>
+        // Collapsible sections
+        var coll = document.getElementsByClassName("collapsible");
+        for (var i = 0; i < coll.length; i++) {
+            coll[i].addEventListener("click", function() {
+                this.classList.toggle("active");
+                var content = this.nextElementSibling;
+                content.classList.toggle("active");
+            });
+        }
+        
+        // Schema toggle
+        function toggleSchema(id) {
+            var content = document.getElementById("schema-" + id);
+            if (content.style.display === "none") {
+                content.style.display = "block";
+            } else {
+                content.style.display = "none";
+            }
+        }
+        
+        // Document list toggle
+        function toggleDocs(id) {
+            var content = document.getElementById("docs-" + id);
+            if (content.style.display === "none") {
+                content.style.display = "block";
+            } else {
+                content.style.display = "none";
+            }
+        }
+        
+        // Auto-expand first few schemas
+        for (var i = 1; i <= Math.min(3, """ + str(len(schema_fields)) + """); i++) {
+            toggleSchema(i);
+        }
+        
+        // Auto-expand configuration
+        document.getElementsByClassName("collapsible")[0].click();
+    </script>
+</body>
+</html>""")
+            
+            return '\n'.join(html_lines)
+        
+        html_content = generate_html_report()
+        
         # Output to console (simplified version)
         print("\n=== Schema breakdown ===")
-        print(f"Index: {INDEX_NAME} | Total docs: {total} | Mode: {'STRICT' if STRICT_MODE else 'CORE-BASED'}")
+        print(f"Index: {INDEX_NAME} | Total docs: {total} | Mode: {'STRICT' if STRICT_MODE else 'HIERARCHY'}")
         for i, (sig, n, pct) in enumerate(rows[:10], start=1):  # Show top 10 in console
             print(f"{i:>3}. {n:>8} docs ({pct:>6})  ->  {len(parse_signature(sig))} fields")
         if len(rows) > 10:
-            print(f"     ... and {len(rows) - 10} more schemas (see detailed report)")
+            print(f"     ... and {len(rows) - 10} more schemas (see detailed HTML report)")
         
-        # Save to text file in a dedicated results subfolder
+        # Save to HTML file in a dedicated results subfolder
         import os
         script_dir = os.path.dirname(os.path.abspath(__file__))
         results_dir = os.path.join(script_dir, "results")
@@ -563,15 +884,15 @@ def main():
         os.makedirs(results_dir, exist_ok=True)
         
         timestamp = __import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')
-        txt_filename = f"schema_analysis_{INDEX_NAME}_{timestamp}.txt"
-        txt_filepath = os.path.join(results_dir, txt_filename)
+        html_filename = f"schema_analysis_{INDEX_NAME}_{timestamp}.html"
+        html_filepath = os.path.join(results_dir, html_filename)
         
         try:
-            with open(txt_filepath, "w", encoding="utf-8") as f:
-                f.write("\n".join(output_lines))
-            print(f"\n[INFO] Detailed analysis written: {txt_filepath}")
+            with open(html_filepath, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            print(f"\n[INFO] Interactive HTML report written: {html_filepath}")
         except Exception as e:
-            print(f"[ERROR] Failed to write text file: {e}")
+            print(f"[ERROR] Failed to write HTML file: {e}")
 
         # Optional CSV
         if CSV_OUT:
