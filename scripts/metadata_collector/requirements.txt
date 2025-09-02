@@ -1,0 +1,9 @@
+# Dependencies for PDF Split Rotate - Metadata Collector
+pandas>=2.0.0
+pyarrow>=10.0.0  # For Parquet support
+tqdm>=4.60.0     # For progress bars
+python-dotenv>=0.19.0  # For environment variable loading
+
+# Additional dependencies for report generation
+plotly>=5.0.0    # For interactive visualizations
+kaleido>=0.2.1   # For static image export (optional)
