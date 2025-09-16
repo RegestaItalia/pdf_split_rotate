@@ -10,3 +10,4 @@ tqdm
 pyarrow
 fastparquet
 pandas
+opencv-python
